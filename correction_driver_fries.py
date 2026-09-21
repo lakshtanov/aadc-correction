@@ -105,36 +105,55 @@ class CorrectionDriverFries:
         return self._run_fixed(z_all, self.window_fraction)
 
     def _run_adaptive(self, z_all):
-        """Run with multiple windows, pick smallest stable one."""
+        """Run with multiple windows, refining downward until unstable."""
+        # Start with initial grid
         windows = sorted(self.adaptive_windows)
         results = {}
         for wf in windows:
             results[wf] = self._run_fixed(z_all, wf, quiet=True)
 
-        # Find smallest stable window: compare adjacent pairs
-        chosen = windows[-1]  # fallback to largest
-        for i in range(len(windows) - 1):
-            w_small = windows[i]
-            w_large = windows[i + 1]
+        # Find smallest stable window
+        def is_stable(w_small, w_large):
             corr_s = results[w_small]['correction']
             corr_l = results[w_large]['correction']
-            # Check stability: all theta components
-            stable = True
             for k in range(self.n_theta):
                 ref = max(abs(corr_s[k]), abs(corr_l[k]), 1e-15)
                 if abs(corr_s[k] - corr_l[k]) / ref > self.adaptive_tol:
-                    stable = False
-                    break
-            if stable:
-                chosen = w_small  # smallest stable window = least bias
+                    return False
+            return True
+
+        # If smallest window is stable, try going smaller
+        while len(windows) > 0:
+            smallest = windows[0]
+            if len(windows) < 2 or not is_stable(windows[0], windows[1]):
+                break
+            # Try half of current smallest
+            finer = smallest / 2.0
+            M = z_all.shape[0]
+            min_paths = max(20, int(M * finer))
+            if min_paths < 10:
+                break  # too few paths
+            results[finer] = self._run_fixed(z_all, finer, quiet=True)
+            windows = [finer] + windows
+            if not is_stable(finer, smallest):
+                # finer is unstable, smallest was the best
+                windows = windows[1:]
                 break
 
-        print(f"  Adaptive: tested w={[f'{w*100:.0f}%' for w in windows]}, "
-              f"chose w={chosen*100:.0f}%")
-        for wf in windows:
+        # Pick smallest stable
+        chosen = windows[-1]
+        for i in range(len(windows) - 1):
+            if is_stable(windows[i], windows[i + 1]):
+                chosen = windows[i]
+                break
+
+        tested = sorted(results.keys())
+        print(f"  Adaptive: tested w={[f'{w*100:.1f}%' for w in tested]}, "
+              f"chose w={chosen*100:.1f}%")
+        for wf in tested:
             c = results[wf]['correction']
             marker = " <--" if wf == chosen else ""
-            print(f"    w={wf*100:4.0f}%: correction={[f'{x:+.4f}' for x in c]}{marker}")
+            print(f"    w={wf*100:5.1f}%: correction={[f'{x:+.4f}' for x in c]}{marker}")
 
         return results[chosen]
 
