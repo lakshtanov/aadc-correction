@@ -29,69 +29,111 @@ The correction driver finds the boundary in normal space via Newton root-finding
 
 ## Drivers
 
-- **`correction_driver.py`** — Scalar driver. Simple, correct, reference implementation.
-- **`correction_driver_vec.py`** — Vectorized driver using `aadc.VectorFunctionWithAD` (AVX + multithreading). ~4× faster than scalar. Per-indicator single-output VFs for Newton — avoids full jacobian overhead.
+| Driver | Method | Bias | Speed |
+|---|---|---|---|
+| `correction_driver.py` | Scalar Newton | None | 1× (reference) |
+| `correction_driver_vec.py` | Vectorized Newton (AVX + multithreading) | None | **7.9×** |
+| `correction_driver_fries.py` | Fries (2018) discretized delta | O(w) | **4-6×** faster than Newton |
+
+### Newton drivers (exact, unbiased)
+
+Newton root-finding in normal space → exact boundary z*, exact density φ(u*). No tuning parameter.
+
+Vectorized driver uses `aadc.VectorFunctionWithAD` with per-indicator single-output VFs for Newton — avoids computing full 51-output jacobian.
+
+### Fries driver (fast, biased)
+
+Implements Fries (2018, arXiv:1811.05741) discretized delta: `δ(X) ≈ 1{|X|<w}/(2w)`.
+This is mathematically equivalent to smoothing with a rectangular kernel — same bias-variance trade-off as classic `Φ(X/ε)`.
+
+Supports **adaptive window selection**: starts with w=2%,5%,10%,20%, then halves downward (1%→0.5%→0.2%→...) until unstable. Picks smallest stable w = optimal bias-variance trade-off.
+
+```python
+# Fixed window
+driver = CorrectionDriverFries(..., window_fraction=0.05)
+
+# Adaptive (recommended)
+driver = CorrectionDriverFries(..., adaptive=True, adaptive_tol=0.10)
+```
+
+## Full benchmark results
+
+50K paths, 500K bump-and-revalue reference. AVX + 4 threads.
+
+### Barrier GBM (10 steps)
+
+| Greek | Bump ref | Newton | N err | Fries 5% | F err | Correction % |
+|---|---|---|---|---|---|---|
+| Delta | +0.816 | +0.809 | 0.9% | +0.821 | 0.6% | 9% |
+| Vega | +23.0 | +23.3 | 1.4% | +22.6 | 2.0% | **34%** |
+
+### Barrier + Hull-White 1F (10 steps, 4 Greeks)
+
+| Greek | Bump ref | Newton | N err | Fries 5% | F err | Correction % |
+|---|---|---|---|---|---|---|
+| Delta | +0.815 | +0.808 | 0.9% | +0.819 | 0.4% | 10% |
+| Vega | +23.4 | +23.0 | 1.7% | +22.3 | 4.9% | **35%** |
+| Rho | +59.1 | +58.7 | 0.7% | +59.0 | 0.2% | 6% |
+| d/dσ_r | -3.5 | -3.7 | 7.2% | -3.7 | 7.6% | 7% |
+
+### 2-asset autocallable (4 dates)
+
+| Greek | Bump ref | Newton | N err | Fries 5% | F err | Correction % |
+|---|---|---|---|---|---|---|
+| dV/dS1 | -0.203 | -0.204 | 0.4% | -0.202 | 0.5% | **100%** |
+| dV/dS2 | -0.132 | -0.137 | 4.1% | -0.125 | 4.7% | **100%** |
+
+### Speed comparison
+
+| Product | Scalar | Newton (AVX,4t) | Fries 5% |
+|---|---|---|---|
+| Barrier GBM | 12.1s | 1.5s (7.9×) | 1.5s |
+| Barrier+HW | — | 14.9s | 2.3s (6.4×) |
+| Autocallable | — | 1.4s | 0.4s (3.7×) |
+
+### Key findings
+
+- **Vega correction = 34%** of total — pathwise alone overestimates by one third
+- **Autocallable: 100% correction** — pathwise = 0, entire Greek is the correction
+- **Fries 4-6× faster** than Newton, comparable accuracy at optimal w
+- **Newton unbiased** — error is MC noise only, converges to zero with more paths
+- **AVX + 4 threads**: 7.9× speedup over scalar driver
 
 ## Examples
 
-### Digital option (1 indicator)
 ```bash
+# Digital option
 python examples/example_digital.py
-```
-Analytic delta: 0.01876, correction delta: 0.01845, error: 1.7%.
 
-### Down-and-out barrier (50 indicators, GBM)
-```bash
+# Down-and-out barrier (GBM)
 python examples/example_barrier.py
-```
 
-### Down-and-out barrier + Hull-White stochastic rate (QuantLib)
-```bash
+# Barrier + Hull-White stochastic rate (QuantLib)
 pip install aadc-quantlib-tracing
 python examples/example_barrier_hw_ql.py
-```
-GBM spot + HW 1F rate, correlated (`ρ=-0.3`). 50 monitoring dates, 50K paths.
-
-All Greeks computed: delta, vega, rho, d/d(σ_r).
-
-| Greek | Pathwise | Correction | Total | vs Bump | Agree |
-|---|---|---|---|---|---|
-| Delta (S₀) | +0.711 | +0.119 | **+0.830** | +0.830 | 0.0% |
-| Vega (σ) | +31.56 | -12.17 | **+19.39** | +20.12 | 3.7% |
-| Rho (r₀) | +53.75 | +4.85 | **+58.61** | +58.89 | 0.5% |
-
-**Correction is essential for vega**: pathwise alone overestimates by 63%.
-
-### AVX + multithreading benchmark
-
-Down-and-out barrier, 10 steps, 20K paths:
-
-| Driver | Time | Speedup |
-|---|---|---|
-| Scalar | 12.1s | 1.0x |
-| Vectorized (1 thread, AVX) | 2.9s | **4.2x** |
-| Vectorized (2 threads) | 2.4s | **5.0x** |
-| Vectorized (4 threads) | 1.5s | **7.9x** |
-
-Results identical to machine precision (diff < 1e-14).
-
-```bash
-python benchmarks/bench_vec_vs_scalar.py
-```
-
-### 2-asset autocallable (Heston, 8 indicators)
-```bash
-python tests/test_autocallable.py
 ```
 
 ## Tests
 
 ```bash
-# Vectorized vs scalar consistency
+# Vectorized vs scalar consistency (machine precision)
 python tests/test_vectorized.py
 
 # Autocallable reference
 python tests/test_autocallable.py
+```
+
+## Benchmarks
+
+```bash
+# AVX + multithreading speedup
+python benchmarks/bench_vec_vs_scalar.py
+
+# Newton vs Fries comparison
+python benchmarks/bench_fries_vs_newton.py
+
+# Full comparison: all products, all Greeks
+python benchmarks/bench_full_comparison.py
 ```
 
 ## API
@@ -125,9 +167,13 @@ result = driver.run(z_all)
 5. **Jump** evaluation: `P(z* + εv) - P(z* - εv)` via central difference
 6. **Accumulate**: `correction_θ += jump · φ(u*) / |v·∇g| · (∂g/∂θ)`
 
-All steps except final dg/dθ are batch-vectorized via `aadc.VectorFunctionWithAD`.
+All steps are batch-vectorized via `aadc.VectorFunctionWithAD`.
 
 ## References
 
 - Lakshtanov, E. "Unbiased Monte Carlo Greeks for Discontinuous Payoffs" (2026)
+- Joshi, M. and D. Kainth, "Rapid and accurate development of prices and Greeks for nth to default credit swaps in the Li model", *Quantitative Finance* 4(3):266-275, 2004
+- Chan, J.H. and M.S. Joshi, "Fast Monte Carlo Greeks for financial products with discontinuous pay-offs", *Mathematical Finance* 23(3):459-495, 2013
+- Capriotti, L., S. Lee, and M. Peacock, "Real time counterparty credit risk management in Monte Carlo", *Risk*, June 2011
+- Fries, C.P., "Stochastic algorithmic differentiation of (expectations of) discontinuous functions (indicator functions)", arXiv:1811.05741, 2018
 - `pip install aadc` — [matlogica.com](https://matlogica.com)
