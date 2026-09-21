@@ -105,57 +105,53 @@ class CorrectionDriverFries:
         return self._run_fixed(z_all, self.window_fraction)
 
     def _run_adaptive(self, z_all):
-        """Run with multiple windows, refining downward until unstable."""
-        # Start with initial grid
+        """Run with multiple windows, pick smallest stable one.
+
+        Stability criterion: split paths into two halves, run each half
+        independently. If results agree (relative diff < tol), the window
+        has enough paths and the result is reliable.
+        """
+        M = z_all.shape[0]
+        half = M // 2
+        z_half1 = z_all[:half]
+        z_half2 = z_all[half:2*half]
+
         windows = sorted(self.adaptive_windows)
-        results = {}
+
+        # For each window, check stability via split-half test
+        stable_results = {}
+        chosen = None
+
         for wf in windows:
-            results[wf] = self._run_fixed(z_all, wf, quiet=True)
+            r_full = self._run_fixed(z_all, wf, quiet=True)
+            r_h1 = self._run_fixed(z_half1, wf, quiet=True)
+            r_h2 = self._run_fixed(z_half2, wf, quiet=True)
 
-        # Find smallest stable window
-        def is_stable(w_small, w_large):
-            corr_s = results[w_small]['correction']
-            corr_l = results[w_large]['correction']
+            # Stability: do the two halves agree?
+            is_stable = True
             for k in range(self.n_theta):
-                ref = max(abs(corr_s[k]), abs(corr_l[k]), 1e-15)
-                if abs(corr_s[k] - corr_l[k]) / ref > self.adaptive_tol:
-                    return False
-            return True
+                ref = max(abs(r_h1['correction'][k]), abs(r_h2['correction'][k]), 1e-15)
+                if abs(r_h1['correction'][k] - r_h2['correction'][k]) / ref > self.adaptive_tol:
+                    is_stable = False
+                    break
 
-        # If smallest window is stable, try going smaller
-        while len(windows) > 0:
-            smallest = windows[0]
-            if len(windows) < 2 or not is_stable(windows[0], windows[1]):
-                break
-            # Try half of current smallest
-            finer = smallest / 2.0
-            M = z_all.shape[0]
-            min_paths = max(20, int(M * finer))
-            if min_paths < 10:
-                break  # too few paths
-            results[finer] = self._run_fixed(z_all, finer, quiet=True)
-            windows = [finer] + windows
-            if not is_stable(finer, smallest):
-                # finer is unstable, smallest was the best
-                windows = windows[1:]
-                break
+            stable_results[wf] = (r_full, is_stable)
+            marker = "stable" if is_stable else "UNSTABLE"
+            c = r_full['correction']
+            c1 = r_h1['correction']
+            c2 = r_h2['correction']
+            print(f"    w={wf*100:5.1f}%: corr={[f'{x:+.4f}' for x in c]}  "
+                  f"half1={[f'{x:+.4f}' for x in c1]}  "
+                  f"half2={[f'{x:+.4f}' for x in c2]}  {marker}")
 
-        # Pick smallest stable
-        chosen = windows[-1]
-        for i in range(len(windows) - 1):
-            if is_stable(windows[i], windows[i + 1]):
-                chosen = windows[i]
-                break
+            if is_stable and chosen is None:
+                chosen = wf  # smallest stable
 
-        tested = sorted(results.keys())
-        print(f"  Adaptive: tested w={[f'{w*100:.1f}%' for w in tested]}, "
-              f"chose w={chosen*100:.1f}%")
-        for wf in tested:
-            c = results[wf]['correction']
-            marker = " <--" if wf == chosen else ""
-            print(f"    w={wf*100:5.1f}%: correction={[f'{x:+.4f}' for x in c]}{marker}")
+        if chosen is None:
+            chosen = windows[-1]  # fallback to largest
 
-        return results[chosen]
+        print(f"  Adaptive: chose w={chosen*100:.1f}%")
+        return stable_results[chosen][0]
 
     def _run_fixed(self, z_all, window_fraction, quiet=False):
         M = z_all.shape[0]
