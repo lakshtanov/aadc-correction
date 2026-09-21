@@ -65,7 +65,7 @@ class CorrectionDriver:
     """Delta-function correction driver for aadc-ng Python API."""
 
     def __init__(self, funcs, payoff_res, indicator_res, z_args, theta_args,
-                 skip_sigma=20.0, jump_eps=1e-4, max_newton=4):
+                 skip_sigma=20.0, jump_eps=1e-4, max_newton=8):
         """
         Args:
             funcs:         aadc.Functions object (kernel B, z=Diff)
