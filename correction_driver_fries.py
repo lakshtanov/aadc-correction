@@ -18,7 +18,18 @@ import aadc
 class CorrectionDriverFries:
 
     def __init__(self, funcs, payoff_res, indicator_res, z_args, theta_args,
-                 window_fraction=0.05, jump_eps=1e-4, num_threads=4):
+                 window_fraction=0.05, jump_eps=1e-4, num_threads=4,
+                 adaptive=False, adaptive_windows=(0.02, 0.05, 0.10),
+                 adaptive_tol=0.05):
+        """
+        Args:
+            window_fraction: fixed window (fraction of paths). Ignored if adaptive=True.
+            adaptive:        if True, run with multiple windows and pick the smallest
+                             stable one (bias-variance optimal).
+            adaptive_windows: tuple of window fractions to try (ascending).
+            adaptive_tol:    relative tolerance for stability check between adjacent windows.
+                             If |corr(w1) - corr(w2)| / |corr(w1)| < tol, w1 is stable.
+        """
         self.funcs = funcs
         self.payoff_res = payoff_res
         self.indicator_res = indicator_res
@@ -27,6 +38,9 @@ class CorrectionDriverFries:
         self.window_fraction = window_fraction
         self.jump_eps = jump_eps
         self.num_threads = num_threads
+        self.adaptive = adaptive
+        self.adaptive_windows = adaptive_windows
+        self.adaptive_tol = adaptive_tol
 
         self.d = len(z_args)
         self.n_ind = len(indicator_res)
@@ -86,6 +100,45 @@ class CorrectionDriverFries:
             self.directions.append((v, norm))
 
     def run(self, z_all):
+        if self.adaptive:
+            return self._run_adaptive(z_all)
+        return self._run_fixed(z_all, self.window_fraction)
+
+    def _run_adaptive(self, z_all):
+        """Run with multiple windows, pick smallest stable one."""
+        windows = sorted(self.adaptive_windows)
+        results = {}
+        for wf in windows:
+            results[wf] = self._run_fixed(z_all, wf, quiet=True)
+
+        # Find smallest stable window: compare adjacent pairs
+        chosen = windows[-1]  # fallback to largest
+        for i in range(len(windows) - 1):
+            w_small = windows[i]
+            w_large = windows[i + 1]
+            corr_s = results[w_small]['correction']
+            corr_l = results[w_large]['correction']
+            # Check stability: all theta components
+            stable = True
+            for k in range(self.n_theta):
+                ref = max(abs(corr_s[k]), abs(corr_l[k]), 1e-15)
+                if abs(corr_s[k] - corr_l[k]) / ref > self.adaptive_tol:
+                    stable = False
+                    break
+            if stable:
+                chosen = w_small  # smallest stable window = least bias
+                break
+
+        print(f"  Adaptive: tested w={[f'{w*100:.0f}%' for w in windows]}, "
+              f"chose w={chosen*100:.0f}%")
+        for wf in windows:
+            c = results[wf]['correction']
+            marker = " <--" if wf == chosen else ""
+            print(f"    w={wf*100:4.0f}%: correction={[f'{x:+.4f}' for x in c]}{marker}")
+
+        return results[chosen]
+
+    def _run_fixed(self, z_all, window_fraction, quiet=False):
         M = z_all.shape[0]
         t_start = time.time()
 
@@ -101,7 +154,7 @@ class CorrectionDriverFries:
         g_all = vals_all[:, 1:]
         price = vals_all[:, 0].mean()
         t1 = time.time()
-        print(f"  Step 1 (batch fwd): {t1-t_start:.1f}s")
+        if not quiet: print(f"  Step 1 (batch fwd): {t1-t_start:.1f}s")
 
         # ── Step 2: Pathwise via scalar ws ───────────────────────────
         ws = self.funcs.create_workspace()
@@ -119,7 +172,7 @@ class CorrectionDriverFries:
                 pathwise[k] += ws.diff(self.theta_args[k])
         pathwise /= M
         t2 = time.time()
-        print(f"  Step 2 (pathwise): {t2-t1:.1f}s")
+        if not quiet: print(f"  Step 2 (pathwise): {t2-t1:.1f}s")
 
         # ── Step 3: Per-indicator Fries correction ───────────────────
         #
@@ -143,7 +196,7 @@ class CorrectionDriverFries:
 
             g_i = g_all[:, i]
             abs_g = np.abs(g_i)
-            n_window = max(20, int(M * self.window_fraction))
+            n_window = max(20, int(M * window_fraction))
             partitioned = np.argpartition(abs_g, min(n_window, M-1))
             near_idx = partitioned[:n_window]
             w = abs_g[near_idx].max()
@@ -207,12 +260,13 @@ class CorrectionDriverFries:
                 sum_correction[k] += np.sum(jump * dg_dt[:, k]) / (2.0 * w)
 
             if (i + 1) % max(1, self.n_ind // 5) == 0 or i == self.n_ind - 1:
-                print(f"  Step 3: indicator {i+1}/{self.n_ind}")
+                if not quiet: print(f"  Step 3: indicator {i+1}/{self.n_ind}")
 
         correction = sum_correction / M
         t3 = time.time()
-        print(f"  Step 3 (Fries correction): {t3-t2:.1f}s")
-        print(f"  Total: {t3-t_start:.1f}s")
+        if not quiet:
+            print(f"  Step 3 (Fries correction): {t3-t2:.1f}s")
+            print(f"  Total: {t3-t_start:.1f}s")
 
         return {
             'price': price,
