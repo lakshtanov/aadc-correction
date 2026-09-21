@@ -62,6 +62,23 @@ All Greeks computed: delta, vega, rho, d/d(σ_r).
 
 **Correction is essential for vega**: pathwise alone overestimates by 63%.
 
+### AVX + multithreading benchmark
+
+Down-and-out barrier, 10 steps, 20K paths:
+
+| Driver | Time | Speedup |
+|---|---|---|
+| Scalar | 12.1s | 1.0x |
+| Vectorized (1 thread, AVX) | 2.9s | **4.2x** |
+| Vectorized (2 threads) | 2.4s | **5.0x** |
+| Vectorized (4 threads) | 1.5s | **7.9x** |
+
+Results identical to machine precision (diff < 1e-14).
+
+```bash
+python benchmarks/bench_vec_vs_scalar.py
+```
+
 ### 2-asset autocallable (Heston, 8 indicators)
 ```bash
 python tests/test_autocallable.py
