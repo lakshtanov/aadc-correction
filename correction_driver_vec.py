@@ -18,7 +18,7 @@ def phi_normal_vec(x):
 class CorrectionDriverVec:
 
     def __init__(self, funcs, payoff_res, indicator_res, z_args, theta_args,
-                 skip_sigma=20.0, jump_eps=1e-4, max_newton=4, num_threads=4):
+                 skip_sigma=20.0, jump_eps=1e-4, max_newton=8, num_threads=4):
         self.funcs = funcs
         self.payoff_res = payoff_res
         self.indicator_res = indicator_res
