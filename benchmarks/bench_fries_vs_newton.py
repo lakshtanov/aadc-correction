@@ -8,7 +8,7 @@ import sys, os, math, time
 import numpy as np
 import aadc
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from correction_driver_vec import CorrectionDriverVec
+from correction_driver_vec2 import CorrectionDriverVec2
 from correction_driver_fries import CorrectionDriverFries
 
 # ── Build tape ──────────────────────────────────────────────────
@@ -43,7 +43,7 @@ payoff = alive * call * aadc.idouble(math.exp(-r0 * T))
 payoff_res = payoff.mark_as_output()
 fn.stop_recording()
 
-M = 20000
+M = 50000
 rng = np.random.RandomState(42)
 z_all = rng.randn(M, N_STEPS)
 
@@ -51,7 +51,7 @@ theta_vals = {S_arg: S0}
 
 # ── Newton (vectorized) ────────────────────────────────────────
 print("Newton correction (vectorized, 4 threads)...")
-drv_newton = CorrectionDriverVec(fn, payoff_res, g_res, z_args, [S_arg],
+drv_newton = CorrectionDriverVec2(fn, payoff_res, g_res, z_args, [S_arg],
                                    skip_sigma=20.0, jump_eps=1e-4, num_threads=4)
 drv_newton.precompute_directions(theta_vals)
 t0 = time.time()
