@@ -1,6 +1,9 @@
 """
 correction_driver_fries.py — Fries (2018) stochastic AAD correction.
 
+Fully vectorized: batch evaluate returns jac_z AND jac_theta.
+No scalar workspace loops.
+
 Discretized delta: for each indicator g_i, collect near-boundary paths
 (|g_i| < w), estimate density as n_near/(2w·M), compute jump via tape
 replay (one Newton step + central difference). Universal for any payoff.
@@ -13,6 +16,9 @@ import math
 import time
 import numpy as np
 import aadc
+import sys
+sys.path.insert(0, "/tmp/aadc-correction-check")
+from aadc_extensions import VectorFunctionSelectiveAD
 
 
 class CorrectionDriverFries:
@@ -21,15 +27,6 @@ class CorrectionDriverFries:
                  window_fraction=0.05, jump_eps=1e-4, num_threads=4,
                  adaptive=False, adaptive_windows=(0.02, 0.05, 0.10),
                  adaptive_tol=0.05):
-        """
-        Args:
-            window_fraction: fixed window (fraction of paths). Ignored if adaptive=True.
-            adaptive:        if True, run with multiple windows and pick the smallest
-                             stable one (bias-variance optimal).
-            adaptive_windows: tuple of window fractions to try (ascending).
-            adaptive_tol:    relative tolerance for stability check between adjacent windows.
-                             If |corr(w1) - corr(w2)| / |corr(w1)| < tol, w1 is stable.
-        """
         self.funcs = funcs
         self.payoff_res = payoff_res
         self.indicator_res = indicator_res
@@ -47,23 +44,8 @@ class CorrectionDriverFries:
         self.n_theta = len(theta_args)
 
         all_res = [payoff_res] + list(indicator_res)
-        self.vf = aadc.VectorFunctionWithAD(
+        self.vf = VectorFunctionSelectiveAD(
             funcs, z_args, all_res,
-            param_args=theta_args, num_threads=num_threads
-        )
-
-        # Per-indicator single-output VF for gradient direction
-        self.vf_ind = []
-        for i in range(self.n_ind):
-            vfi = aadc.VectorFunctionWithAD(
-                funcs, z_args, [indicator_res[i]],
-                param_args=theta_args, num_threads=num_threads
-            )
-            self.vf_ind.append(vfi)
-
-        # Payoff-only VF for jump evaluation
-        self.vf_payoff = aadc.VectorFunctionWithAD(
-            funcs, z_args, [payoff_res],
             param_args=theta_args, num_threads=num_threads
         )
 
@@ -71,13 +53,9 @@ class CorrectionDriverFries:
         self.theta_values = None
 
     def precompute_directions(self, theta_values):
-        """Compute gradient directions at z=0."""
         self.theta_values = theta_values
         theta_list = [theta_values[a] for a in self.theta_args]
         self.vf.set_params(theta_list)
-        self.vf_payoff.set_params(theta_list)
-        for vfi in self.vf_ind:
-            vfi.set_params(theta_list)
 
         ws = self.funcs.create_workspace()
         for j in range(self.d):
@@ -105,20 +83,13 @@ class CorrectionDriverFries:
         return self._run_fixed(z_all, self.window_fraction)
 
     def _run_adaptive(self, z_all):
-        """Run with multiple windows, pick smallest stable one.
-
-        Stability criterion: split paths into two halves, run each half
-        independently. If results agree (relative diff < tol), the window
-        has enough paths and the result is reliable.
-        """
+        """Split-half adaptive window selection."""
         M = z_all.shape[0]
         half = M // 2
         z_half1 = z_all[:half]
         z_half2 = z_all[half:2*half]
 
         windows = sorted(self.adaptive_windows)
-
-        # For each window, check stability via split-half test
         stable_results = {}
         chosen = None
 
@@ -127,7 +98,6 @@ class CorrectionDriverFries:
             r_h1 = self._run_fixed(z_half1, wf, quiet=True)
             r_h2 = self._run_fixed(z_half2, wf, quiet=True)
 
-            # Stability: do the two halves agree?
             is_stable = True
             for k in range(self.n_theta):
                 ref = max(abs(r_h1['correction'][k]), abs(r_h2['correction'][k]), 1e-15)
@@ -145,10 +115,10 @@ class CorrectionDriverFries:
                   f"half2={[f'{x:+.4f}' for x in c2]}  {marker}")
 
             if is_stable and chosen is None:
-                chosen = wf  # smallest stable
+                chosen = wf
 
         if chosen is None:
-            chosen = windows[-1]  # fallback to largest
+            chosen = windows[-1]
 
         print(f"  Adaptive: chose w={chosen*100:.1f}%")
         return stable_results[chosen][0]
@@ -157,49 +127,32 @@ class CorrectionDriverFries:
         M = z_all.shape[0]
         t_start = time.time()
 
-        # ── Step 1: Batch forward (values only) ──────────────────────
+        # ── Step 1: Batch forward + jac_theta ─────────────────────────
         BATCH = 5000
         n_out = 1 + self.n_ind
         vals_all = np.zeros((M, n_out))
+        jac_theta_all = np.zeros((M, n_out, self.n_theta)) if self.n_theta > 0 else None
         for start in range(0, M, BATCH):
             end = min(start + BATCH, M)
-            v_b, _, _ = self.vf.evaluate(z_all[start:end])
+            v_b, _, jt_b, _ = self.vf.evaluate(z_all[start:end])
             vals_all[start:end] = v_b
+            if jac_theta_all is not None and jt_b is not None:
+                jac_theta_all[start:end] = jt_b
 
         g_all = vals_all[:, 1:]
         price = vals_all[:, 0].mean()
         t1 = time.time()
         if not quiet: print(f"  Step 1 (batch fwd): {t1-t_start:.1f}s")
 
-        # ── Step 2: Pathwise via scalar ws ───────────────────────────
-        ws = self.funcs.create_workspace()
-        pathwise = np.zeros(self.n_theta)
-        for m in range(M):
-            for j in range(self.d):
-                ws.set_val(self.z_args[j], float(z_all[m, j]))
-            for arg, val in self.theta_values.items():
-                ws.set_val(arg, val)
-            ws.forward()
-            ws.reset_diff()
-            ws.set_diff(self.payoff_res, 1.0)
-            ws.reverse()
-            for k in range(self.n_theta):
-                pathwise[k] += ws.diff(self.theta_args[k])
-        pathwise /= M
+        # ── Step 2: Pathwise from jac_theta ───────────────────────────
+        if jac_theta_all is not None:
+            pathwise = jac_theta_all[:, 0, :].mean(axis=0)
+        else:
+            pathwise = np.zeros(self.n_theta)
         t2 = time.time()
         if not quiet: print(f"  Step 2 (pathwise): {t2-t1:.1f}s")
 
-        # ── Step 3: Per-indicator Fries correction ───────────────────
-        #
-        # For each near-boundary path (|g_i| < w):
-        #   1. One Newton step to boundary: u1 = u1_orig - g_i/vdg
-        #   2. Jump via tape replay: P(z*+εv) - P(z*-εv)
-        #   3. dg/dθ via scalar reverse
-        #   4. Accumulate: jump · dg/dθ / (2w)
-        #
-        # This is Fries discretized delta but with tape-based jump
-        # estimation — works for any payoff (barriers, autocallables).
-
+        # ── Step 3: Per-indicator Fries correction ────────────────────
         sum_correction = np.zeros(self.n_theta)
         total_near = 0
         eps = self.jump_eps
@@ -218,15 +171,16 @@ class CorrectionDriverFries:
             if w < 1e-15:
                 continue
 
-            z_near = z_all[near_idx]  # (n_window, d)
-            u1_orig = z_near @ v_i    # (n_window,)
+            z_near = z_all[near_idx]
+            u1_orig = z_near @ v_i
             total_near += n_window
 
-            # Batch: get vdg for near paths via single-output VF
-            v_n, j_n, _ = self.vf_ind[i].evaluate(z_near)
-            g_near = v_n[:, 0]
-            dg_dz = j_n[:, 0, :]  # (n_window, d)
-            vdg = dg_dz @ v_i     # (n_window,)
+            # Batch: get vdg for near paths via selective evaluate
+            ind_res = self.indicator_res[i]
+            v_n, j_n, _ = self.vf.evaluate_selective(z_near, [ind_res])
+            g_near = v_n[:, 1 + i]
+            dg_dz = j_n[:, 0, :]
+            vdg = dg_dz @ v_i
 
             # Newton steps to boundary (2-3 iterations, batch)
             good = np.abs(vdg) > 1e-15
@@ -236,8 +190,8 @@ class CorrectionDriverFries:
             for newton_it in range(3):
                 du = u1 - u1_orig
                 z_star_it = z_near + du[:, None] * v_i[None, :]
-                v_it, j_it, _ = self.vf_ind[i].evaluate(z_star_it)
-                g_it = v_it[:, 0]
+                v_it, j_it, _ = self.vf.evaluate_selective(z_star_it, [ind_res])
+                g_it = v_it[:, 1 + i]
                 converged = np.abs(g_it) < 1e-8
                 if np.all(converged):
                     break
@@ -248,27 +202,16 @@ class CorrectionDriverFries:
             du = u1 - u1_orig
             z_star = z_near + du[:, None] * v_i[None, :]
 
-            # Jump via batch tape replay (payoff-only VF)
+            # Jump via batch forward (payoff-only)
             z_above = z_star + eps * v_i[None, :]
             z_below = z_star - eps * v_i[None, :]
-            p_above, _, _ = self.vf_payoff.evaluate(z_above)
-            p_below, _, _ = self.vf_payoff.evaluate(z_below)
-            jump = p_above[:, 0] - p_below[:, 0]  # (n_window,)
+            p_above = self.vf.evaluate_forward(z_above)
+            p_below = self.vf.evaluate_forward(z_below)
+            jump = p_above[:, 0] - p_below[:, 0]
 
-            # dg/dθ at near-boundary paths via scalar ws
-            dg_dt = np.zeros((n_window, self.n_theta))
-            for pos in range(n_window):
-                m = int(near_idx[pos])
-                for j in range(self.d):
-                    ws.set_val(self.z_args[j], float(z_all[m, j]))
-                for arg, val in self.theta_values.items():
-                    ws.set_val(arg, val)
-                ws.forward()
-                ws.reset_diff()
-                ws.set_diff(self.indicator_res[i], 1.0)
-                ws.reverse()
-                for k in range(self.n_theta):
-                    dg_dt[pos, k] = ws.diff(self.theta_args[k])
+            # dg/dθ from jac_theta (already computed in Step 1)
+            dg_dt = jac_theta_all[near_idx, 1 + i, :] if jac_theta_all is not None \
+                else np.zeros((n_window, self.n_theta))
 
             # Accumulate: Σ jump · dg/dθ / (2w)
             for k in range(self.n_theta):
