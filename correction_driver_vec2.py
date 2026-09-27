@@ -21,26 +21,35 @@ def phi_normal_vec(x):
 
 class CorrectionDriverVec2:
 
-    def __init__(self, funcs, payoff_res, indicator_res, z_args, theta_args,
-                 skip_sigma=20.0, jump_eps=1e-4, max_newton=8, num_threads=4,
-                 indicator_types=None):
+    def __init__(self, funcs, payoff_res, z_args, theta_args,
+                 indicator_res=None, indicator_types=None,
+                 skip_sigma=20.0, jump_eps=1e-4, max_newton=8, num_threads=4):
         """
         Args:
-            indicator_res: list of Result handles for g (from cmp_switches).
-            indicator_types: list of 'jump' or 'kink' per indicator (from sw.origin).
-                If None, all treated as 'jump' (backward compatible).
-                JUMP: correction on payoff VALUE discontinuity.
-                KINK: correction on payoff DERIVATIVE discontinuity.
+            funcs: aadc.Functions with recorded tape.
+            payoff_res: Result handle for the payoff output.
+            z_args: list of Argument handles for stochastic inputs (normals).
+            theta_args: list of Argument handles for model parameters.
+            indicator_res: list of Result handles for g. If None, auto-discovered
+                from funcs.cmp_switches() (requires register_switches at recording).
+            indicator_types: list of 'jump' or 'kink'. If None, auto-discovered.
         """
         self.funcs = funcs
         self.payoff_res = payoff_res
-        self.indicator_res = indicator_res
         self.z_args = z_args
         self.theta_args = theta_args
         self.skip_sigma = skip_sigma
         self.jump_eps = jump_eps
         self.max_newton = max_newton
         self.num_threads = num_threads
+
+        # Auto-discover indicators from switch registry
+        if indicator_res is None:
+            switches = funcs.cmp_switches()
+            indicator_res = [sw.g for sw in switches]
+            indicator_types = [sw.origin for sw in switches]
+
+        self.indicator_res = indicator_res
         self.indicator_types = indicator_types or ['jump'] * len(indicator_res)
 
         self.d = len(z_args)
