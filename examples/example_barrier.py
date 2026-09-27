@@ -40,14 +40,13 @@ payoff = alive * call * aadc.idouble(math.exp(-r0 * T))
 payoff_res = payoff.mark_as_output()
 fn.stop_recording()
 
-g_res = [sw.g for sw in fn.cmp_switches()]
-print(f"Switch registry: {len(g_res)} indicators")
+print(f"Switch registry: {len(fn.cmp_switches())} indicators")
 
 # ── Run ──────────────────────────────────────────────────────
 M = 50000
 z_all = np.random.RandomState(42).randn(M, N_STEPS)
 
-driver = CorrectionDriverVec2(fn, payoff_res, g_res, z_args, [S_arg],
+driver = CorrectionDriverVec2(fn, payoff_res, z_args, [S_arg],
                                skip_sigma=20.0, jump_eps=1e-4, num_threads=4)
 driver.precompute_directions({S_arg: S0})
 result = driver.run(z_all)
