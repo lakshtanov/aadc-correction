@@ -22,7 +22,16 @@ def phi_normal_vec(x):
 class CorrectionDriverVec2:
 
     def __init__(self, funcs, payoff_res, indicator_res, z_args, theta_args,
-                 skip_sigma=20.0, jump_eps=1e-4, max_newton=8, num_threads=4):
+                 skip_sigma=20.0, jump_eps=1e-4, max_newton=8, num_threads=4,
+                 indicator_types=None):
+        """
+        Args:
+            indicator_res: list of Result handles for g (from cmp_switches).
+            indicator_types: list of 'jump' or 'kink' per indicator (from sw.origin).
+                If None, all treated as 'jump' (backward compatible).
+                JUMP: correction on payoff VALUE discontinuity.
+                KINK: correction on payoff DERIVATIVE discontinuity.
+        """
         self.funcs = funcs
         self.payoff_res = payoff_res
         self.indicator_res = indicator_res
@@ -32,6 +41,7 @@ class CorrectionDriverVec2:
         self.jump_eps = jump_eps
         self.max_newton = max_newton
         self.num_threads = num_threads
+        self.indicator_types = indicator_types or ['jump'] * len(indicator_res)
 
         self.d = len(z_args)
         self.n_ind = len(indicator_res)
@@ -192,19 +202,34 @@ class CorrectionDriverVec2:
 
             phi_vals = phi_normal_vec(u1[conv]) / np.abs(vdg_final)
 
-            # Jump: forward only (no reverse needed)
             eps = self.jump_eps
             z_above = z_star_conv + eps * v_i[None, :]
             z_below = z_star_conv - eps * v_i[None, :]
 
-            v_above = self.vf.evaluate_forward(z_above)
-            v_below = self.vf.evaluate_forward(z_below)
-            jump = v_above[:, 0] - v_below[:, 0]  # payoff column
+            if self.indicator_types[i] == 'jump':
+                # JUMP: discontinuity in payoff VALUE
+                # jump = V(z*+εv) - V(z*-εv)
+                v_above = self.vf.evaluate_forward(z_above)
+                v_below = self.vf.evaluate_forward(z_below)
+                jump = v_above[:, 0] - v_below[:, 0]
 
-            for k in range(self.n_theta):
-                contrib = jump * phi_vals * dg_dt_final[:, k]
-                contrib[~good_vdg] = 0.0
-                sum_correction[k] += contrib.sum()
+                for k in range(self.n_theta):
+                    contrib = jump * phi_vals * dg_dt_final[:, k]
+                    contrib[~good_vdg] = 0.0
+                    sum_correction[k] += contrib.sum()
+
+            else:  # kink
+                # KINK: discontinuity in payoff DERIVATIVE (slope)
+                # slope_jump_k = dV/dθ_k(z*+εv) - dV/dθ_k(z*-εv)
+                _, _, jt_above, _ = self.vf.evaluate(z_above)
+                _, _, jt_below, _ = self.vf.evaluate(z_below)
+                if jt_above is not None and jt_below is not None:
+                    slope_jump = jt_above[:, 0, :] - jt_below[:, 0, :]  # (n_conv, n_theta)
+                    for k in range(self.n_theta):
+                        # For kink: no dg/dθ factor — the slope jump IS the correction integrand
+                        contrib = slope_jump[:, k] * phi_vals
+                        contrib[~good_vdg] = 0.0
+                        sum_correction[k] += contrib.sum()
 
             if (i + 1) % 10 == 0:
                 print(f"  Step 2: indicator {i+1}/{self.n_ind}, "
