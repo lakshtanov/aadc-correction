@@ -51,12 +51,13 @@ for i in range(N_OBS):
     disc = disc + aadc.idouble(r0 * dt)
     S_i = aadc.math.exp(logS)
 
-    # Autocall: if S > barrier AND alive → redeem
+    # Autocall: ONE comparison per date (avoids double-counted switches)
+    autocalled = aadc.iif(S_i > aadc.idouble(autocall_barrier),
+                          aadc.idouble(1.0), aadc.idouble(0.0))
     redemption = alive * (aadc.idouble(1.0) + aadc.idouble(coupon * (i + 1) * dt)) \
                  * aadc.math.exp(-disc)
-    redeemed = aadc.iif(S_i > aadc.idouble(autocall_barrier), redemption, aadc.idouble(0.0))
-    payoff = payoff + redeemed
-    alive = aadc.iif(S_i > aadc.idouble(autocall_barrier), aadc.idouble(0.0), alive)
+    payoff = payoff + autocalled * redemption
+    alive = alive * (aadc.idouble(1.0) - autocalled)
 
 # Final payoff
 S_T = aadc.math.exp(logS)
