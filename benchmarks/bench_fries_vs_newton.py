@@ -52,7 +52,7 @@ theta_vals = {S_arg: S0}
 
 # ── Newton (vectorized) ────────────────────────────────────────
 print("Newton correction (vectorized, 4 threads)...")
-drv_newton = CorrectionDriverVec2(fn, payoff_res, g_res, z_args, [S_arg],
+drv_newton = CorrectionDriverVec2(fn, payoff_res, z_args, [S_arg],
                                    skip_sigma=20.0, jump_eps=1e-4, num_threads=4)
 drv_newton.precompute_directions(theta_vals)
 t0 = time.time()

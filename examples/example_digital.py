@@ -44,16 +44,14 @@ payoff_res = payoff.mark_as_output()
 
 fn.stop_recording()
 
-# Indicators from switch registry
-g_res = [sw.g for sw in fn.cmp_switches()]
-print(f"Switch registry: {len(g_res)} indicators")
+print(f"Switch registry: {len(fn.cmp_switches())} indicators")
 
 # ── Correction driver ──────────────────────────────────────────
 M = 50000
 rng = np.random.RandomState(42)
 z_all = rng.randn(M, 1)
 
-driver = CorrectionDriverVec2(fn, payoff_res, g_res, [z_arg], [S_arg],
+driver = CorrectionDriverVec2(fn, payoff_res, [z_arg], [S_arg],
                                skip_sigma=20.0, jump_eps=1e-4, num_threads=4)
 driver.precompute_directions({S_arg: S0})
 
