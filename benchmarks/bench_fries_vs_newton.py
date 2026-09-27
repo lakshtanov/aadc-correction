@@ -2,7 +2,7 @@
 bench_fries_vs_newton.py — Compare Fries regression vs Newton correction.
 
 Same product (down-and-out barrier, 10 steps), same paths.
-Compare accuracy, speed, bias.
+Uses switch registry (aadc >= 2.22.1) for automatic indicator discovery.
 """
 import sys, os, math, time
 import numpy as np
@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from correction_driver_vec2 import CorrectionDriverVec2
 from correction_driver_fries import CorrectionDriverFries
 
-# ── Build tape ──────────────────────────────────────────────────
+# ── Build tape with switch registry ──────────────────────────
 S0, K, B = 100.0, 90.0, 80.0
 sigma, r0, T = 0.25, 0.05, 1.0
 N_STEPS = 10
@@ -19,29 +19,30 @@ dt = T / N_STEPS
 sqrtDt = math.sqrt(dt)
 
 fn = aadc.Functions()
-fn.start_recording()
+fn.start_recording(register_switches=aadc.SWITCH_JUMP)
 S = aadc.idouble(S0); S_arg = S.mark_as_input()
 z_list, z_args = [], []
 for j in range(N_STEPS):
     zj = aadc.idouble(0.0); z_args.append(zj.mark_as_input()); z_list.append(zj)
 
-logS = np.log(S)
+logS = aadc.math.log(S)
 drift = aadc.idouble((r0 - 0.5 * sigma**2) * dt)
 alive = aadc.idouble(1.0)
-g_res = []
 for j in range(N_STEPS):
     logS = logS + drift + aadc.idouble(sigma * sqrtDt) * z_list[j]
-    S_j = np.exp(logS)
-    g = S_j - aadc.idouble(B)
-    g_res.append(g.mark_as_output())
+    S_j = aadc.math.exp(logS)
     ko = aadc.iif(S_j > aadc.idouble(B), aadc.idouble(1.0), aadc.idouble(0.0))
     alive = alive * ko
 
-S_T = np.exp(logS)
+S_T = aadc.math.exp(logS)
 call = aadc.iif(S_T > aadc.idouble(K), S_T - aadc.idouble(K), aadc.idouble(0.0))
 payoff = alive * call * aadc.idouble(math.exp(-r0 * T))
 payoff_res = payoff.mark_as_output()
 fn.stop_recording()
+
+# Indicators from switch registry — no manual g creation needed
+g_res = [sw.g for sw in fn.cmp_switches()]
+print(f"Switch registry: {len(g_res)} indicators (automatic)")
 
 M = 50000
 rng = np.random.RandomState(42)
@@ -90,20 +91,20 @@ bump_delta = (p_up - p_dn) / (2 * h)
 print(f"\n{'='*65}")
 print(f"Down-and-Out Barrier, {N_STEPS} steps, {M} paths")
 print(f"Bump-and-revalue reference delta: {bump_delta:+.6f}")
-print(f"")
-print(f"{'Method':<30} {'Delta':>10} {'Error':>8} {'Time':>8}")
-print(f"{'-'*60}")
-print(f"{'Newton (vec, 4 threads)':<30} {res_newton['total'][0]:>+10.6f} "
-      f"{abs(res_newton['total'][0]-bump_delta)/abs(bump_delta)*100:>7.1f}% "
-      f"{t_newton:>7.1f}s")
+print(f"\n{'Method':<36} {'Delta':>10} {'Error':>8} {'Time':>8}")
+print("-" * 65)
 
+methods = [("Newton (vec, 4 threads)", res_newton['total'][0], t_newton)]
+# Re-run Fries for timing
 for wf in [0.05, 0.10, 0.20, 0.30]:
-    drv_f = CorrectionDriverFries(fn, payoff_res, g_res, z_args, [S_arg],
-                                   window_fraction=wf, num_threads=4)
-    drv_f.precompute_directions(theta_vals)
+    drv_fries = CorrectionDriverFries(fn, payoff_res, g_res, z_args, [S_arg],
+                                       window_fraction=wf, num_threads=4)
+    drv_fries.precompute_directions(theta_vals)
     t0 = time.time()
-    res_f = drv_f.run(z_all)
-    t_f = time.time() - t0
-    err = abs(res_f['total'][0] - bump_delta) / abs(bump_delta) * 100
-    print(f"{'Fries (w='+str(int(wf*100))+'%)':<30} {res_f['total'][0]:>+10.6f} "
-          f"{err:>7.1f}% {t_f:>7.1f}s")
+    res_fries = drv_fries.run(z_all)
+    t_fries = time.time() - t0
+    methods.append((f"Fries (w={wf*100:.0f}%)", res_fries['total'][0], t_fries))
+
+for name, delta, t in methods:
+    err = abs(delta - bump_delta) / abs(bump_delta) * 100
+    print(f"{name:<36} {delta:+10.6f} {err:7.1f}% {t:7.1f}s")
