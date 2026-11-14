@@ -12,7 +12,8 @@ import time
 import numpy as np
 import aadc
 import sys
-sys.path.insert(0, "/tmp/aadc-correction-check")
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aadc_extensions import VectorFunctionSelectiveAD
 
 
