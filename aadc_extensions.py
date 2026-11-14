@@ -4,6 +4,7 @@ aadc_extensions.py — VectorFunctionSelectiveAD wrapper over aadc.Functions.
 Batch evaluate with AVX + multithreading. Supports:
   evaluate()          — full reverse over all outputs, returns jac_z AND jac_theta
   evaluate_selective() — reverse only for selected outputs
+  evaluate_selective_theta() — same, adjoints w.r.t. z_args AND param_args
   evaluate_forward()   — forward only (no reverse)
 """
 from typing import Any, Dict, List, Optional
@@ -122,6 +123,44 @@ class VectorFunctionSelectiveAD:
             for j, a in enumerate(self._args):
                 jac[:, k, j] = derivs[r][a]
         return out, jac, errors
+
+    def evaluate_selective_theta(self, x: Any, outputs: List,
+                                 error_mode: "ErrorCollectionMode" = ErrorCollectionMode.NONE):
+        """Reverse only for selected outputs, adjoints w.r.t. z_args AND param_args.
+
+        Same reverse passes as evaluate_selective (one per selected output);
+        the parameter adjoints come from the same sweep.
+        Returns (values, jac_z, jac_theta, errors):
+          values:    (M, n_out)              — all outputs
+          jac_z:     (M, len(outputs), d)
+          jac_theta: (M, len(outputs), n_theta) or None if no param_args
+        """
+        x = np.asarray(x, dtype=np.float64)
+        x2 = x.reshape(1, -1) if x.ndim == 1 else x
+        inputs: Dict[Argument, Any] = {
+            a: np.ascontiguousarray(x2[:, j]) for j, a in enumerate(self._args)
+        }
+        inputs.update(self._params)
+        inputs.update(self._batch_params)
+        diff_args = self._args + self._param_args
+        request = {r: (diff_args if r in outputs else []) for r in self._res}
+        values_dict, derivs, errors = evaluate(
+            funcs=self._funcs, request=request, inputs=inputs,
+            workers=self._num_threads, error_mode=error_mode)
+        batch = x2.shape[0]
+        out = np.empty((batch, len(self._res)))
+        for k, r in enumerate(self._res):
+            out[:, k] = values_dict[r]
+        jac = np.empty((batch, len(outputs), len(self._args)))
+        jac_theta = np.empty((batch, len(outputs), len(self._param_args))) \
+            if self._param_args else None
+        for k, r in enumerate(outputs):
+            for j, a in enumerate(self._args):
+                jac[:, k, j] = derivs[r][a]
+            if jac_theta is not None:
+                for j, a in enumerate(self._param_args):
+                    jac_theta[:, k, j] = derivs[r][a]
+        return out, jac, jac_theta, errors
 
     def evaluate_forward(self, x: Any,
                          error_mode: "ErrorCollectionMode" = ErrorCollectionMode.NONE):
