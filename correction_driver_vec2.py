@@ -2,8 +2,9 @@
 correction_driver_vec2.py — Fully vectorized correction using selective evaluate.
 
 Single VectorFunctionSelectiveAD replaces all per-indicator VFs.
-evaluate() returns jac_z AND jac_theta — no scalar loops needed.
-evaluate_selective() for Newton (1 reverse pass per indicator).
+evaluate() returns jac_z AND jac_theta — no scalar loops needed (step 1 only).
+evaluate_selective_theta() for Newton (1 reverse pass per indicator, also
+gives dg/dθ at the root — no full reverse after Newton).
 evaluate_forward() for jump (0 reverse passes).
 """
 import math
@@ -166,26 +167,37 @@ class CorrectionDriverVec2:
             converged = np.zeros(n_keep, dtype=bool)
 
             # ── Newton: selective evaluate (1 indicator only) ──────
+            # One reverse pass (indicator i) per unconverged path per iteration.
+            # The same pass gives dg_i/dz and dg_i/dθ, stored at convergence,
+            # so no extra passes are needed at the root.
             ind_res = self.indicator_res[i]
+            vdg_star = np.zeros(n_keep)
+            dg_dt_star = np.zeros((n_keep, self.n_theta))
+            active = np.arange(n_keep)
             for newton_iter in range(self.max_newton):
-                du = u1 - u1_orig_k
-                z_star = z_keep + du[:, None] * v_i[None, :]
+                du = u1[active] - u1_orig_k[active]
+                z_star = z_keep[active] + du[:, None] * v_i[None, :]
 
-                # Selective: reverse only for indicator i
-                v_n, j_n, _ = self.vf.evaluate_selective(z_star, [ind_res])
+                v_n, j_n, jt_n, _ = self.vf.evaluate_selective_theta(z_star, [ind_res])
                 g_at = v_n[:, 1 + i]  # values from all outputs
-                dg_dz_n = j_n[:, 0, :]  # jac for selected output only
+                vdg_new = j_n[:, 0, :] @ v_i
 
                 newly_converged = np.abs(g_at) < 1e-8
-                converged |= newly_converged
-                if np.all(converged):
+                done = active[newly_converged]
+                converged[done] = True
+                vdg_star[done] = vdg_new[newly_converged]
+                if jt_n is not None:
+                    dg_dt_star[done] = jt_n[newly_converged, 0, :]
+
+                active = active[~newly_converged]
+                if len(active) == 0:
                     break
+                g_at = g_at[~newly_converged]
+                vdg_new = vdg_new[~newly_converged]
+                good = np.abs(vdg_new) > 1e-15
+                u1[active[good]] -= g_at[good] / vdg_new[good]
 
-                vdg_new = dg_dz_n @ v_i
-                good = (~converged) & (np.abs(vdg_new) > 1e-15)
-                u1[good] -= g_at[good] / vdg_new[good]
-
-            # ── Final gradient + jump for converged ──────────────
+            # ── Jump for converged ───────────────────────────────
             conv = np.where(converged)[0]
             n_conv = len(conv)
             if n_conv == 0:
@@ -194,16 +206,8 @@ class CorrectionDriverVec2:
             du_conv = u1[conv] - u1_orig_k[conv]
             z_star_conv = z_keep[conv] + du_conv[:, None] * v_i[None, :]
 
-            # Final vdg via selective
-            _, j_f, _ = self.vf.evaluate_selective(z_star_conv, [ind_res])
-            vdg_final = j_f[:, 0, :] @ v_i
-
-            # dg/dθ at z* — batch evaluate, extract jac_theta for indicator i
-            v_final, _, jt_final, _ = self.vf.evaluate(z_star_conv)
-            if jt_final is not None:
-                dg_dt_final = jt_final[:, 1 + i, :]  # indicator i is output 1+i
-            else:
-                dg_dt_final = np.zeros((n_conv, self.n_theta))
+            vdg_final = vdg_star[conv]
+            dg_dt_final = dg_dt_star[conv]
 
             good_vdg = np.abs(vdg_final) > 1e-15
             if not np.any(good_vdg):
@@ -230,8 +234,9 @@ class CorrectionDriverVec2:
             else:  # kink
                 # KINK: discontinuity in payoff DERIVATIVE (slope)
                 # slope_jump_k = dV/dθ_k(z*+εv) - dV/dθ_k(z*-εv)
-                _, _, jt_above, _ = self.vf.evaluate(z_above)
-                _, _, jt_below, _ = self.vf.evaluate(z_below)
+                # reverse for the payoff only
+                _, _, jt_above, _ = self.vf.evaluate_selective_theta(z_above, [self.payoff_res])
+                _, _, jt_below, _ = self.vf.evaluate_selective_theta(z_below, [self.payoff_res])
                 if jt_above is not None and jt_below is not None:
                     slope_jump = jt_above[:, 0, :] - jt_below[:, 0, :]  # (n_conv, n_theta)
                     for k in range(self.n_theta):
