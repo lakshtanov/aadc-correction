@@ -155,24 +155,35 @@ class CorrectionDriverVec3:
                 u1 -= step
                 converged = np.zeros(n_keep, dtype=bool)
 
-                # Newton: worst-case iterations across batch
+                # Newton: worst-case iterations across batch.
+                # Unconverged paths only; dg_i/dz and dg_i/dθ from the same
+                # reverse pass, stored at convergence (no extra passes at the root).
                 ind_res = self.indicator_res[i]
+                vdg_star = np.zeros(n_keep)
+                dg_dt_star = np.zeros((n_keep, self.n_theta))
+                active = np.arange(n_keep)
                 for newton_iter in range(self.max_newton):
-                    du = u1 - u1_orig
-                    z_star = z_keep + du[:, None] * v_i[None, :]
+                    du = u1[active] - u1_orig[active]
+                    z_star = z_keep[active] + du[:, None] * v_i[None, :]
 
-                    v_n, j_n, _ = self.vf.evaluate_selective(z_star, [ind_res])
+                    v_n, j_n, jt_n, _ = self.vf.evaluate_selective_theta(z_star, [ind_res])
                     g_at = v_n[:, 1 + i]
-                    dg_dz_n = j_n[:, 0, :]
+                    vdg_new = j_n[:, 0, :] @ v_i
 
                     newly_converged = np.abs(g_at) < 1e-8
-                    converged |= newly_converged
-                    if np.all(converged):
-                        break
+                    done = active[newly_converged]
+                    converged[done] = True
+                    vdg_star[done] = vdg_new[newly_converged]
+                    if jt_n is not None:
+                        dg_dt_star[done] = jt_n[newly_converged, 0, :]
 
-                    vdg_new = dg_dz_n @ v_i
-                    good = (~converged) & (np.abs(vdg_new) > 1e-15)
-                    u1[good] -= g_at[good] / vdg_new[good]
+                    active = active[~newly_converged]
+                    if len(active) == 0:
+                        break
+                    g_at = g_at[~newly_converged]
+                    vdg_new = vdg_new[~newly_converged]
+                    good = np.abs(vdg_new) > 1e-15
+                    u1[active[good]] -= g_at[good] / vdg_new[good]
 
                 conv = np.where(converged)[0]
                 n_conv = len(conv)
@@ -182,14 +193,8 @@ class CorrectionDriverVec3:
                 du_conv = u1[conv] - u1_orig[conv]
                 z_star_conv = z_keep[conv] + du_conv[:, None] * v_i[None, :]
 
-                _, j_f, _ = self.vf.evaluate_selective(z_star_conv, [ind_res])
-                vdg_final = j_f[:, 0, :] @ v_i
-
-                v_final, _, jt_final, _ = self.vf.evaluate(z_star_conv)
-                if jt_final is not None:
-                    dg_dt_final = jt_final[:, 1 + i, :]
-                else:
-                    dg_dt_final = np.zeros((n_conv, self.n_theta))
+                vdg_final = vdg_star[conv]
+                dg_dt_final = dg_dt_star[conv]
 
                 good_vdg = np.abs(vdg_final) > 1e-15
                 if not np.any(good_vdg):
@@ -209,8 +214,9 @@ class CorrectionDriverVec3:
                         contrib[~good_vdg] = 0.0
                         sum_correction[k] += contrib.sum()
                 else:
-                    _, _, jt_above, _ = self.vf.evaluate(z_above)
-                    _, _, jt_below, _ = self.vf.evaluate(z_below)
+                    # reverse for the payoff only
+                    _, _, jt_above, _ = self.vf.evaluate_selective_theta(z_above, [self.payoff_res])
+                    _, _, jt_below, _ = self.vf.evaluate_selective_theta(z_below, [self.payoff_res])
                     if jt_above is not None and jt_below is not None:
                         slope_jump = jt_above[:, 0, :] - jt_below[:, 0, :]
                         for k in range(self.n_theta):
