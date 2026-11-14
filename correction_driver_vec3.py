@@ -63,6 +63,10 @@ class CorrectionDriverVec3:
         self.theta_values = theta_values
         self.theta_list = [theta_values[a] for a in self.theta_args]
         self.vf.set_params(self.theta_list)
+        # Other inputs the caller gave values for (e.g. a spot that is not differentiated):
+        # they must reach evaluate too, aadc.evaluate reads garbage for a missing input.
+        theta_set = set(self.theta_args)
+        self.vf.set_fixed_inputs({a: v for a, v in theta_values.items() if a not in theta_set})
 
         ws = self.funcs.create_workspace()
         for j in range(self.d):

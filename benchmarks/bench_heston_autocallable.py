@@ -105,8 +105,9 @@ for d in range(N_OBS):
         logS[a] = logS[a] + (aadc.idouble(R) - aadc.idouble(0.5) * v_pos) * aadc.idouble(dt) \
                   + sqrt_v * aadc.idouble(sqrtDt) * z_spot[a]
 
-    # Worst-of performance
-    perfs = [aadc.math.exp(logS[a]) / S_ids[a] for a in range(N_ASSETS)]
+    # Worst-of performance vs the initial fixing. The fixing is a contract constant:
+    # dividing by the spot input S_ids[a] would cancel S0 and make every delta zero.
+    perfs = [aadc.math.exp(logS[a]) / aadc.idouble(S0[a]) for a in range(N_ASSETS)]
     worst = perfs[0]
     for a in range(1, N_ASSETS):
         worst = aadc.iif(perfs[a] < worst, perfs[a], worst)
