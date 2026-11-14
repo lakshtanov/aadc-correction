@@ -38,12 +38,22 @@ class VectorFunctionSelectiveAD:
         self._num_threads = num_threads
         self._params: Dict[Argument, float] = {}
         self._batch_params: Dict[Argument, Any] = {}
+        self._fixed: Dict[Argument, float] = {}
 
     def set_params(self, params: Any) -> None:
         params = np.atleast_1d(np.asarray(params, dtype=np.float64)).ravel()
         if len(params) != len(self._param_args):
             raise ValueError("set_params: wrong number of parameters")
         self._params = {a: float(p) for a, p in zip(self._param_args, params)}
+
+    def set_fixed_inputs(self, fixed: Dict[Argument, float]) -> None:
+        """Constant inputs that are neither args nor param_args (no adjoints).
+
+        aadc.evaluate does not reject a missing input: it reads whatever is in
+        the workspace (garbage, or a stale value from a previous call), so every
+        recorded input must be passed.
+        """
+        self._fixed = {a: float(v) for a, v in fixed.items()}
 
     def set_batch_params(self, batch_params: Any) -> None:
         bp = np.asarray(batch_params, dtype=np.float64)
@@ -74,6 +84,7 @@ class VectorFunctionSelectiveAD:
             a: np.ascontiguousarray(x2[:, j]) for j, a in enumerate(self._args)
         }
         inputs.update(self._params)
+        inputs.update(self._fixed)
         inputs.update(self._batch_params)
         # Request adjoints for BOTH z_args and param_args
         all_diff_args = self._args + self._param_args
@@ -106,6 +117,7 @@ class VectorFunctionSelectiveAD:
             a: np.ascontiguousarray(x2[:, j]) for j, a in enumerate(self._args)
         }
         inputs.update(self._params)
+        inputs.update(self._fixed)
         inputs.update(self._batch_params)
         # Request: selected outputs get full reverse, others get values only
         request = {}
@@ -141,6 +153,7 @@ class VectorFunctionSelectiveAD:
             a: np.ascontiguousarray(x2[:, j]) for j, a in enumerate(self._args)
         }
         inputs.update(self._params)
+        inputs.update(self._fixed)
         inputs.update(self._batch_params)
         diff_args = self._args + self._param_args
         request = {r: (diff_args if r in outputs else []) for r in self._res}
@@ -171,6 +184,7 @@ class VectorFunctionSelectiveAD:
             a: np.ascontiguousarray(x2[:, j]) for j, a in enumerate(self._args)
         }
         inputs.update(self._params)
+        inputs.update(self._fixed)
         inputs.update(self._batch_params)
         request = {r: [] for r in self._res}
         values_dict, _, errors = evaluate(
