@@ -79,6 +79,13 @@ Digital option (analytic reference): 0.0% error.
 
 Times: Xeon Silver 4114, process pinned to 10 physical cores of one socket, `OPENBLAS_NUM_THREADS=1`. Before #1 (full reverse over all outputs after Newton) the Newton row was 8.5s on the same machine; Fries is unchanged. On this 2×10-core box the driver is fastest with `num_threads` ≤ cores of one socket: spreading over both sockets (16-20 threads) is slower than 10.
 
+## Slide benchmarks
+
+`benchmarks/bench_slides_benchmarks.py` reproduces the three benchmark slides — GBM down-and-out call (50 dates),
+3-asset Heston Phoenix autocallable (drift-implicit sqrt(v) scheme), GBM + Hull-White down-and-out call (50 dates):
+pathwise, correction and total for every Greek (mean ± s.e. over seeds) against an independent reference
+(central bump with common random numbers on AADC, 3.2e7-6.4e7 paths, two step sizes). `QUICK=1` for a short run.
+
 ## API
 
 ```python
