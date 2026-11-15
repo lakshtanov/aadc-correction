@@ -86,6 +86,11 @@ Times: Xeon Silver 4114, process pinned to 10 physical cores of one socket, `OPE
 pathwise, correction and total for every Greek (mean ± s.e. over seeds) against an independent reference
 (central bump with common random numbers on AADC, 3.2e7-6.4e7 paths, two step sizes). `QUICK=1` for a short run.
 
+`benchmarks/bench_slides_denominator.py` checks the small-maturity limit, where the correction divides by
+|dg/du| ~ S sigma sqrt(t) -> 0: down-and-out call with K < B, spot from 100 down to 80.1 (barrier 80), T from 1 to
+0.01. The correction grows like 1/sqrt(T) near the barrier, stays finite, and the total agrees with an
+independent bump (all 7 cases within 2.2 s.e.).
+
 ## API
 
 ```python
