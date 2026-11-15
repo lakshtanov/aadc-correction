@@ -5,6 +5,10 @@ Benchmark 2 from WBS/QuantMinds slides. Compares Newton vs Fries with
 honest bias analysis: run at multiple M to separate bias from noise.
 
 3 assets, Heston SV, 8 observation dates, coupon + autocall + put.
+
+Variance: drift-implicit scheme for y = sqrt(v) (Alfonsi 2005), positive and smooth without any truncation
+when 4 kappa theta > xi^2. A truncated Euler scheme (max(v, 0)) has a kink at v = 0 that biases the
+vol-of-vol Greek of the correction and removes most of the QMC gain.
 """
 import sys, os, math, time
 import numpy as np
@@ -33,6 +37,8 @@ NOTIONAL = 100.0
 
 dt = T / N_OBS
 sqrtDt = math.sqrt(dt)
+for _a in range(N_ASSETS):
+    assert 4 * KAPPA[_a] * THETA[_a] > XI[_a] ** 2, "drift-implicit sqrt(v) scheme needs 4 kappa theta > xi^2"
 nz = 2 * N_ASSETS * N_OBS  # 2 normals per asset per step (spot + vol)
 
 # Cholesky for asset correlation (simplified: pairwise = CORR_ASSETS)
@@ -63,9 +69,9 @@ z_list = []; z_args = []
 for j in range(nz):
     zj = aadc.idouble(0.0); z_args.append(zj.mark_as_input()); z_list.append(zj)
 
-# State: logS[a], v[a]
+# State: logS[a], y[a] = sqrt(v[a])
 logS = [aadc.math.log(S_ids[a]) for a in range(N_ASSETS)]
-v = [aadc.idouble(V0[a]) for a in range(N_ASSETS)]
+y = [aadc.math.sqrt(aadc.idouble(V0[a])) for a in range(N_ASSETS)]
 
 payoff = aadc.idouble(0.0)
 alive = aadc.idouble(1.0)
@@ -89,17 +95,15 @@ for d in range(N_OBS):
         rho_sv2 = math.sqrt(1.0 - rho_sv**2)
         w_v = aadc.idouble(rho_sv) * z_spot[a] + aadc.idouble(rho_sv2) * z_vol[a]
 
-        # Variance process (truncated Euler)
-        v_pos = aadc.iif(v[a] > aadc.idouble(0.0), v[a], aadc.idouble(0.0))
-        sqrt_v = aadc.math.sqrt(v_pos + aadc.idouble(1e-10))
-
-        if a == 0:
-            dv = kappa_id * (aadc.idouble(THETA[a]) - v_pos) * aadc.idouble(dt) \
-                 + xi_id * sqrt_v * aadc.idouble(sqrtDt) * w_v
-        else:
-            dv = aadc.idouble(KAPPA[a]) * (aadc.idouble(THETA[a]) - v_pos) * aadc.idouble(dt) \
-                 + aadc.idouble(XI[a]) * sqrt_v * aadc.idouble(sqrtDt) * w_v
-        v[a] = v[a] + dv
+        # Variance: drift-implicit scheme for y = sqrt(v) (no truncation, smooth in z and parameters)
+        kap = kappa_id if a == 0 else aadc.idouble(KAPPA[a])
+        xi = xi_id if a == 0 else aadc.idouble(XI[a])
+        sqrt_v = y[a]
+        v_pos = y[a] * y[a]
+        aa = y[a] + aadc.idouble(0.5 * sqrtDt) * xi * w_v
+        cc = aadc.idouble(1.0) + aadc.idouble(0.5 * dt) * kap
+        y[a] = (aa + aadc.math.sqrt(aa * aa + aadc.idouble(4.0 * dt) * cc
+                                    * (aadc.idouble(0.5 * THETA[a]) * kap - aadc.idouble(0.125) * xi * xi))) / (aadc.idouble(2.0) * cc)
 
         # Spot process
         logS[a] = logS[a] + (aadc.idouble(R) - aadc.idouble(0.5) * v_pos) * aadc.idouble(dt) \
