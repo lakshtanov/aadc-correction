@@ -54,6 +54,7 @@ Each switch provides `g` (signed distance to boundary) as a tape Result handle. 
 |---|---|---|---|
 | `correction_driver_vec2.py` | Fully vectorized Newton (AVX + MT) | None | 1× |
 | `correction_driver_fries.py` | Fries (2018) discretized delta | O(w) | **~6-7×** faster |
+| `rqmc.py` (`CorrectionDriverRQMC`) | Vec2 on scrambled Sobol points (see below) | None | 1× per path, far fewer paths |
 
 Both drivers are fully vectorized — no scalar workspace loops. `jac_theta` computed in batch via `aadc.evaluate()`.
 
@@ -114,9 +115,15 @@ All numbers of the QMC slides (scheme comparison, equal time vs smoothing, paths
 `benchmarks/bench_slides_qmc.py` (`QUICK=1` for a short run).
 Newton vs Fries with MC and Sobol (2-asset autocallable): `benchmarks/bench_slides_fries.py`.
 
-GBM down-and-out call, 10 dates (`tests/test_rqmc.py`): 5-6x. On the Heston digital with the smooth scheme,
+GBM down-and-out call, 10 dates (`tests/test_rqmc.py`): standard error 5.9x smaller than MC with
+`"active_subspace"`, 4.8x with `"bridge"`. On the Heston digital with the smooth scheme,
 at equal wall time the δ-correction + Sobol is 6-14x more accurate (RMSE incl. bias) than smoothing + Sobol with
 the best width chosen per budget.
+
+`benchmarks/bench_slides_ladder.py`: delta and gamma ladders vs spot for Benchmark 2 (spot of asset 1 from 60 to 130,
+the same 4000 paths on every point; gamma = central difference of two corrected deltas). The corrected estimator is
+smooth in the spot for fixed paths, so the ladder is smooth at 4000 paths (RMSE vs an 8M-path bump: delta 0.006,
+gamma 0.001; bump on the same paths: 0.024, 0.045). `PLOTS=1` writes `fig_ladder_b2.pdf`.
 
 ## API
 
@@ -129,12 +136,9 @@ fn.start_recording(register_switches=aadc.SWITCH_JUMP)
 # ... model code ...
 fn.stop_recording()
 
-# Automatic indicators
-g_res = [sw.g for sw in fn.cmp_switches()]
-
-# Setup driver
-driver = CorrectionDriverVec2(fn, payoff_res, g_res, z_args, theta_args,
-                               num_threads=4)
+# Setup driver: indicators are taken from the switch registry when indicator_res is not given
+# (or pass them explicitly: indicator_res=[sw.g for sw in fn.cmp_switches()])
+driver = CorrectionDriverVec2(fn, payoff_res, z_args, theta_args, num_threads=4)
 driver.precompute_directions({S_arg: S0, vol_arg: sigma})
 
 # Run
