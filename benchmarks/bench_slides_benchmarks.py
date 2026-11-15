@@ -16,6 +16,8 @@ Benchmark 3  Down-and-out call, GBM spot + Hull-White 1F short rate, 50 dates (s
 
 Usage:  OPENBLAS_NUM_THREADS=1 python benchmarks/bench_slides_benchmarks.py         (~1 h)
         QUICK=1 ...  (a few minutes: fewer paths)       ONLY=1,3 ...  (subset)      THREADS=10 (default)
+        TIMING=1 ... cost only: wall time of pathwise AAD (forward + one reverse of the payoff) vs one run of the
+                     correction driver on the same paths and threads, and their ratio (the "overhead").
 Raw results -> bench_slides_benchmarks.json (OUT=...).
 """
 import sys, os, io, json, math, time, contextlib
@@ -165,6 +167,28 @@ def reference(t, millions):
         m = s1 / n; out.append((m, np.sqrt((s2 / n - m * m) / n)))
     return out
 
+
+def timing(t, M):
+    """(pathwise AAD time, driver time) for one estimate on M paths, same paths and threads."""
+    Z = np.random.RandomState(7).randn(M, len(t["za"]))
+    inp = {a: np.ascontiguousarray(Z[:, j]) for j, a in enumerate(t["za"])}; inp.update(t["thv"])
+    aadc.evaluate(funcs=t["fn"], request={t["rP"]: t["th"]}, inputs=inp, workers=THREADS)          # warm-up
+    t0 = time.perf_counter(); aadc.evaluate(funcs=t["fn"], request={t["rP"]: t["th"]}, inputs=inp, workers=THREADS)
+    t_pw = time.perf_counter() - t0
+    d = CorrectionDriverVec2(t["fn"], t["rP"], t["za"], t["th"], num_threads=THREADS); d.precompute_directions(t["thv"])
+    t0 = time.perf_counter()
+    with contextlib.redirect_stdout(io.StringIO()):
+        d.run(Z)
+    return t_pw, time.perf_counter() - t0
+
+
+if __name__ == "__main__" and os.environ.get("TIMING") == "1":
+    print(f"{'benchmark':58s} {'paths':>8s} {'pathwise AAD':>13s} {'driver':>9s} {'overhead':>9s}")
+    for b in ONLY:
+        title, build, (M, seeds), refM = BENCH[b]
+        t = build(); tp, td = timing(t, M)
+        print(f"{title:58s} {M:8,d} {tp:12.3f}s {td:8.1f}s {td / tp:8.0f}x", flush=True)
+    sys.exit(0)
 
 if __name__ == "__main__":
     res = {}
