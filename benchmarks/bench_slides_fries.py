@@ -4,7 +4,8 @@ bench_slides_fries.py — reproduce the slide "Newton vs Fries: MC and Sobol".
 Product: 2-asset worst-of autocallable, GBM, 4 quarterly dates, T = 1 (S0 = 100, 100; vol 0.20, 0.25; corr 0.5;
 r = 0.03; coupon 5% if worst > 70%, autocall if worst > 100%). Greeks dV/dS1, dV/dS2, dV/dsigma1.
 
-Methods, each with MC and with scrambled Sobol (automatic ordering, rqmc.CorrectionDriverRQMC's rotation):
+Methods, each with MC and with scrambled Sobol (rqmc.CorrectionDriverRQMC's rotation: option B = automatic
+ordering, the default; Newton also with option A = Brownian bridge per factor, normals 0, 2, 4, ... and 1, 3, 5, ...):
   Newton     CorrectionDriverVec2 (δ-correction, unbiased)
   Fries w    CorrectionDriverFries with window fraction w = 1%, 5%, 10% (discretised delta, biased O(w))
 N = 2^16 paths per estimate, R = 16 independent repetitions (seeds / scramblings) of every method.
@@ -84,11 +85,17 @@ if __name__ == "__main__":
           + "   (h vs 2h: " + " ".join(f"{(a - b) / math.hypot(c_, d):+.1f}σ" for a, b, c_, d in zip(ref, ref2, se, se2)) + ")")
     q = CorrectionDriverRQMC(fn, rP, za, th, indicator_res=g, indicator_types=["jump"] * len(g), num_threads=THREADS, pilot_seed=999)
     q.precompute_directions(thv)
-    points = {"MC": lambda r: np.random.default_rng(10_000 + r).standard_normal((N, len(za))), "Sobol": lambda r: q.sample(N, r)}
+    qa = CorrectionDriverRQMC(fn, rP, za, th, indicator_res=g, indicator_types=["jump"] * len(g), num_threads=THREADS,
+                              ordering="bridge", bridge_factors=[list(range(0, len(za), 2)), list(range(1, len(za), 2))])
+    qa.precompute_directions(thv)
+    points = {"MC": lambda r: np.random.default_rng(10_000 + r).standard_normal((N, len(za))), "Sobol": lambda r: q.sample(N, r),
+              "Sobol A": lambda r: qa.sample(N, r)}
     methods = [("Newton", None)] + [(f"Fries {int(w * 100)}%", w) for w in WINDOWS]
     rows = []
     for setup, gen in points.items():
         for name, w in methods:
+            if setup == "Sobol A" and w is not None:
+                continue
             est = []
             for r in range(R):
                 Z = gen(r)
