@@ -79,17 +79,44 @@ Digital option (analytic reference): 0.0% error.
 
 Times: Xeon Silver 4114, process pinned to 10 physical cores of one socket, `OPENBLAS_NUM_THREADS=1`. Before #1 (full reverse over all outputs after Newton) the Newton row was 8.5s on the same machine; Fries is unchanged. On this 2×10-core box the driver is fastest with `num_threads` ≤ cores of one socket: spreading over both sockets (16-20 threads) is slower than 10.
 
-## Slide benchmarks
+## Randomized QMC (Sobol)
 
-`benchmarks/bench_slides_benchmarks.py` reproduces the three benchmark slides — GBM down-and-out call (50 dates),
-3-asset Heston Phoenix autocallable (drift-implicit sqrt(v) scheme), GBM + Hull-White down-and-out call (50 dates):
-pathwise, correction and total for every Greek (mean ± s.e. over seeds) against an independent reference
-(central bump with common random numbers on AADC, 3.2e7-6.4e7 paths, two step sizes). `QUICK=1` for a short run.
+`rqmc.py` — `CorrectionDriverRQMC`: the same correction (`CorrectionDriverVec2` inside) fed with scrambled Sobol
+points; returns the Greeks and their standard error over independent scramblings.
 
-`benchmarks/bench_slides_denominator.py` checks the small-maturity limit, where the correction divides by
-|dg/du| ~ S sigma sqrt(t) -> 0: down-and-out call with K < B, spot from 100 down to 80.1 (barrier 80), T from 1 to
-0.01. The correction grows like 1/sqrt(T) near the barrier, stays finite, and the total agrees with an
-independent bump (all 7 cases within 2.2 s.e.).
+```python
+from rqmc import CorrectionDriverRQMC
+drv = CorrectionDriverRQMC(fn, payoff_res, z_args, theta_args, num_threads=8)   # ordering="active_subspace"
+drv.precompute_directions(theta_values)
+res = drv.run(n_paths=2**14, n_scramble=16)
+res["total"], res["stderr"]
+```
+
+Why it works: the correction integrates the payoff jump analytically along the Newton line, so the indicator
+is gone from the per-path estimator; what is left is as smooth as the switch functions — QMC applies.
+Smoothing cannot do this: a small width makes the integrand nearly discontinuous, a large one biases it.
+
+- **Ordering** (which directions get the best Sobol coordinates; any orthogonal map keeps the estimator
+  unbiased): `"active_subspace"` (default) — automatic, from tape gradients on pilot paths, needs no knowledge of
+  the inputs; `"bridge"` — Brownian bridge, pass `bridge_factors` (tape indices per Brownian factor); `"none"`.
+- **The model discretization must be smooth.** A kink such as a variance floor `max(v, v_min)` makes ∂g/∂θ jump
+  on oblique surfaces and removes most of the gain. For Heston use the drift-implicit scheme for `sqrt(v)`
+  (no floor; needs `4·kappa·theta > xi²`), see `examples/example_heston_rqmc.py`.
+
+Heston digital, 2^13 paths x 16 (`examples/example_heston_rqmc.py`), standard-error reduction RQMC vs MC:
+
+| variance scheme | delta | d/d(xi) | d/d(kappa) |
+|---|---|---|---|
+| Euler, `max(v, 0.1·theta)` | 1.9x | 1.3x | 1.4x |
+| drift-implicit `sqrt(v)` (no floor) | 13.7x | 16.5x | 11.3x |
+
+All numbers of the QMC slides (scheme comparison, equal time vs smoothing, paths needed for the same accuracy):
+`benchmarks/bench_slides_qmc.py` (`QUICK=1` for a short run).
+Newton vs Fries with MC and Sobol (2-asset autocallable): `benchmarks/bench_slides_fries.py`.
+
+GBM down-and-out call, 10 dates (`tests/test_rqmc.py`): 5-6x. On the Heston digital with the smooth scheme,
+at equal wall time the δ-correction + Sobol is 6-14x more accurate (RMSE incl. bias) than smoothing + Sobol with
+the best width chosen per budget.
 
 ## API
 
