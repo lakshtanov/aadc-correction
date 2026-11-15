@@ -8,8 +8,8 @@ rho = -0.7, r = 0.03; Greeks dV/dS0, dV/dxi, dV/dkappa. Three variance schemes:
   alfonsi       drift-implicit scheme for sqrt(v), no floor           (smooth; 4 kappa theta > xi^2)
 
 Slide "QMC Result: the Scheme Decides"
-    For each scheme: correction driver with MC and with RQMC (CorrectionDriverRQMC, automatic ordering),
-    N = 2^10..2^16, R = 16 replications. Error reduction RQMC/MC at 2^16, convergence order alpha of RQMC,
+    For each scheme: correction driver with MC and with RQMC (CorrectionDriverRQMC; option B = automatic
+    ordering, the default, and option A = Brownian bridge per factor), N = 2^8..2^16, R = 16 replications. Error reduction RQMC/MC at 2^16, convergence order alpha of RQMC,
     max |bias| vs the reference in units of the combined standard error.
 Slides "QMC Result: Equal Time vs Smoothing" / "Numbers"  (alfonsi scheme)
     RMSE (incl. bias) at wall-time budgets 0.05 s and 0.5 s per estimate for: correction + Sobol,
@@ -114,20 +114,26 @@ def reference(scheme):
 
 
 def run_driver(scheme):
-    """MC and RQMC (automatic ordering) estimates of the correction driver: {setup: [(N, mean, std, time/est)]}."""
+    """Estimates of the correction driver: {setup: [(N, mean, std, time/est)]}; setups MC, RQMC (option B,
+    automatic ordering) and RQMC_bridge (option A, Brownian bridge per factor: spot normals 0, 2, 4, ...,
+    variance normals 1, 3, 5, ...)."""
     fn, rP, za, th, thv = tape(scheme)
     mc = CorrectionDriverVec2(fn, rP, za, th, num_threads=THREADS); mc.precompute_directions(thv)
-    q = CorrectionDriverRQMC(fn, rP, za, th, num_threads=THREADS, pilot_seed=999); q.precompute_directions(thv)
-    res = {"MC": [], "RQMC": []}
+    q = {"RQMC": CorrectionDriverRQMC(fn, rP, za, th, num_threads=THREADS, pilot_seed=999),
+         "RQMC_bridge": CorrectionDriverRQMC(fn, rP, za, th, num_threads=THREADS, ordering="bridge",
+                                             bridge_factors=[list(range(0, 2 * N_STEPS, 2)), list(range(1, 2 * N_STEPS, 2))])}
+    for d in q.values():
+        d.precompute_directions(thv)
+    res = {"MC": [], "RQMC": [], "RQMC_bridge": []}
     for m in range(M_DRV[0], M_DRV[1] + 1):
         N = 2 ** m
-        for setup in ("MC", "RQMC"):
+        for setup in res:
             est, t = [], 0.0
             for r in range(R):
-                Z = np.random.default_rng(10_000 + r).standard_normal((N, len(za))) if setup == "MC" else q.sample(N, r)
+                Z = np.random.default_rng(10_000 + r).standard_normal((N, len(za))) if setup == "MC" else q[setup].sample(N, r)
                 t0 = time.perf_counter()
                 with contextlib.redirect_stdout(io.StringIO()):
-                    est.append((mc if setup == "MC" else q.driver).run(Z)["total"])
+                    est.append((mc if setup == "MC" else q[setup].driver).run(Z)["total"])
                 t += time.perf_counter() - t0
             est = np.array(est); res[setup].append((N, est.mean(0), est.std(0, ddof=1), t / R))
     return res
@@ -248,6 +254,12 @@ if __name__ == "__main__":
         bias = max(abs(qm[k] - g[k]) / math.hypot(qs[k] / math.sqrt(R), se[k]) for k in range(3))
         print(f"{scheme:14s}" + "".join(f"{c:>18s}" for c in cells) + f"{bias:10.1f}σ")
 
+    if all("RQMC_bridge" in drv[s] for s in drv):
+        print(f"\nOption A (Brownian bridge) vs option B (automatic), error reduction over MC at N=2^{M_DRV[1]}:")
+        for scheme in drv:
+            mcs, qa, qb = drv[scheme]["MC"][-1][2], drv[scheme]["RQMC_bridge"][-1][2], drv[scheme]["RQMC"][-1][2]
+            print(f"{scheme:14s}" + "".join(f"{f'A {mcs[k] / qa[k]:.1f}x  B {mcs[k] / qb[k]:.1f}x':>18s}" for k in range(3)))
+
     print(f"\n{'=' * 78}\nSLIDE: QMC Result — Equal Time vs Smoothing / Numbers  (alfonsi; RMSE incl. bias)\n{'=' * 78}")
     g, se = refs["alfonsi"]
     print("reference: " + ", ".join(f"{nm} {a:+.4f}±{b:.1e}" for nm, a, b in zip(NAMES, g, se)))
@@ -263,6 +275,8 @@ if __name__ == "__main__":
     print(f"\n{'=' * 78}\nSLIDE: QMC — Paths for the Same Accuracy  (alfonsi; RMSE incl. bias <= target · |Greek|)\n{'=' * 78}")
     methods = [("smoothing + MC", smo["MC"], "smo"), ("smoothing + Sobol", smo["RQMC"], "smo"),
                ("correction + MC", drv["alfonsi"]["MC"], "drv"), ("correction + Sobol", drv["alfonsi"]["RQMC"], "drv")]
+    if "RQMC_bridge" in drv["alfonsi"]:
+        methods.append(("correction + Sobol A", drv["alfonsi"]["RQMC_bridge"], "drv"))
     for tgt in TARGETS:
         print(f"target {tgt:.1%}:")
         for nm, rows, kind in methods:
