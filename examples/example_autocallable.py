@@ -3,9 +3,6 @@ example_autocallable.py — Phoenix autocallable with correction driver.
 
 Uses switch registry (aadc >= 2.22.1) for automatic indicator discovery.
 N observation dates, early redemption if S > autocall barrier.
-
-This is the Python version; a C++ version with AADCNG_IF (BranchManager)
-is proposed for matlogica/aadc-example-pybind11.
 """
 import sys, os, math, time
 import numpy as np
