@@ -112,6 +112,7 @@ Heston digital, 2^13 paths x 16 (`examples/example_heston_rqmc.py`), standard-er
 
 All numbers of the QMC slides (scheme comparison, equal time vs smoothing, paths needed for the same accuracy):
 `benchmarks/bench_slides_qmc.py` (`QUICK=1` for a short run).
+Newton vs Fries with MC and Sobol (2-asset autocallable): `benchmarks/bench_slides_fries.py`.
 
 GBM down-and-out call, 10 dates (`tests/test_rqmc.py`): 5-6x. On the Heston digital with the smooth scheme,
 at equal wall time the δ-correction + Sobol is 6-14x more accurate (RMSE incl. bias) than smoothing + Sobol with
