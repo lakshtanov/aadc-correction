@@ -110,6 +110,9 @@ Heston digital, 2^13 paths x 16 (`examples/example_heston_rqmc.py`), standard-er
 | Euler, `max(v, 0.1·theta)` | 1.9x | 1.3x | 1.4x |
 | drift-implicit `sqrt(v)` (no floor) | 13.7x | 16.5x | 11.3x |
 
+All numbers of the QMC slides (scheme comparison, equal time vs smoothing, paths needed for the same accuracy):
+`benchmarks/bench_slides_qmc.py` (`QUICK=1` for a short run).
+
 GBM down-and-out call, 10 dates (`tests/test_rqmc.py`): 5-6x. On the Heston digital with the smooth scheme,
 at equal wall time the δ-correction + Sobol is 6-14x more accurate (RMSE incl. bias) than smoothing + Sobol with
 the best width chosen per budget.
