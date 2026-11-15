@@ -129,14 +129,14 @@ class CorrectionDriverRQMC:
 
     def __init__(self, funcs, payoff_res, z_args, theta_args, indicator_res=None, indicator_types=None,
                  ordering: str = "active_subspace", bridge_factors: Optional[List[List[int]]] = None,
-                 n_pilot: int = 2000, **driver_kwargs):
+                 n_pilot: int = 2000, pilot_seed: int = 12345, **driver_kwargs):
         if ordering not in ("active_subspace", "bridge", "none"):
             raise ValueError("ordering: 'active_subspace', 'bridge' or 'none'")
         if ordering == "bridge" and bridge_factors is None:
             raise ValueError("ordering='bridge' needs bridge_factors (tape indices per Brownian factor)")
         self.funcs, self.payoff_res, self.z_args, self.theta_args = funcs, payoff_res, list(z_args), list(theta_args)
         self.indicator_res = indicator_res
-        self.ordering, self.bridge_factors, self.n_pilot = ordering, bridge_factors, n_pilot
+        self.ordering, self.bridge_factors, self.n_pilot, self.pilot_seed = ordering, bridge_factors, n_pilot, pilot_seed
         self.num_threads = driver_kwargs.get("num_threads", 4)
         self.driver = CorrectionDriverVec2(funcs, payoff_res, z_args, theta_args, indicator_res=indicator_res,
                                            indicator_types=indicator_types, **driver_kwargs)
@@ -149,7 +149,7 @@ class CorrectionDriverRQMC:
         if self.ordering == "active_subspace":
             self.Q, self.eigen_share = active_subspace_rotation(
                 self.funcs, self.payoff_res, self.z_args, self.theta_args, theta_values,
-                indicator_res=self.indicator_res, n_pilot=self.n_pilot, num_threads=self.num_threads)
+                indicator_res=self.indicator_res, n_pilot=self.n_pilot, seed=self.pilot_seed, num_threads=self.num_threads)
         elif self.ordering == "bridge":
             self.Q = bridge_rotation(d, self.bridge_factors)
         else:
