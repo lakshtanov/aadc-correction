@@ -10,6 +10,13 @@ Batch evaluate with AVX + multithreading. Supports:
 from typing import Any, Dict, List, Optional
 import numpy as np
 from aadc import Functions, evaluate, Argument
+import os
+import platform
+try:
+    from aadc import evaluate_core as _evaluate_core      # aadc >= 2.x: lets the vector width be chosen
+    from aadc import ErrorBuffer as _ErrorBuffer
+except ImportError:
+    _evaluate_core = _ErrorBuffer = None
 try:
     from concurrent.futures import ThreadPoolExecutor as ThreadPool
 except ImportError:
@@ -22,12 +29,31 @@ except ImportError:
         NONE = None
 
 
+def _best_vector_kind():
+    """'avx512' on x86-64 Linux CPUs with AVX-512F, else None (engine default)."""
+    try:
+        if platform.machine().lower() in ("x86_64", "amd64") and os.path.exists("/proc/cpuinfo"):
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("flags"):
+                        return "avx512" if " avx512f" in line else None
+    except OSError:
+        pass
+    return None
+
+
 class VectorFunctionSelectiveAD:
 
     def __init__(self, funcs: Functions, args: Any, res: Any, *,
                  param_args: Any = (), batch_param_args: Any = (),
-                 num_threads: int = 1) -> None:
+                 num_threads: int = 1, vector_kind: Any = "best") -> None:
+        """vector_kind: AADC vector workspace for the batched replays: "best" (AVX-512 where the CPU has it,
+        else the engine default), None / "auto" (engine default), or "scalar" / "avx2" / "avx512".
+        Results are bitwise identical across kinds; only speed changes."""
         self._funcs = funcs
+        if vector_kind == "best":
+            vector_kind = _best_vector_kind()
+        self._vector_kind = None if vector_kind in (None, "auto") or _evaluate_core is None else vector_kind
         self._args = list(np.ravel(np.asarray(args, dtype=object)))
         self._res = list(np.ravel(np.asarray(res, dtype=object)))
         self._param_args = list(np.ravel(np.asarray(param_args, dtype=object))) \
@@ -39,6 +65,16 @@ class VectorFunctionSelectiveAD:
         self._params: Dict[Argument, float] = {}
         self._batch_params: Dict[Argument, Any] = {}
         self._fixed: Dict[Argument, float] = {}
+
+    def _evaluate(self, funcs, request, inputs, workers, error_mode=ErrorCollectionMode.NONE):
+        """aadc.evaluate, on the chosen vector workspace when no error collection is requested."""
+        if self._vector_kind is not None and (error_mode is None or error_mode == ErrorCollectionMode.NONE):
+            try:
+                values, derivs = _evaluate_core(funcs, request, inputs, int(workers or 1), self._vector_kind)
+                return values, derivs, _ErrorBuffer()
+            except ValueError:            # tape with a scalar-only block: fall back to the engine default
+                self._vector_kind = None
+        return evaluate(funcs=funcs, request=request, inputs=inputs, workers=workers, error_mode=error_mode)
 
     def set_params(self, params: Any) -> None:
         params = np.atleast_1d(np.asarray(params, dtype=np.float64)).ravel()
@@ -89,7 +125,7 @@ class VectorFunctionSelectiveAD:
         # Request adjoints for BOTH z_args and param_args
         all_diff_args = self._args + self._param_args
         request = {r: all_diff_args for r in self._res}
-        values, derivs, errors = evaluate(
+        values, derivs, errors = self._evaluate(
             funcs=self._funcs, request=request, inputs=inputs,
             workers=self._num_threads, error_mode=error_mode)
         batch = x2.shape[0]
@@ -123,7 +159,7 @@ class VectorFunctionSelectiveAD:
         request = {}
         for r in self._res:
             request[r] = self._args if r in outputs else []
-        values_dict, derivs, errors = evaluate(
+        values_dict, derivs, errors = self._evaluate(
             funcs=self._funcs, request=request, inputs=inputs,
             workers=self._num_threads, error_mode=error_mode)
         batch = x2.shape[0]
@@ -157,7 +193,7 @@ class VectorFunctionSelectiveAD:
         inputs.update(self._batch_params)
         diff_args = self._args + self._param_args
         request = {r: (diff_args if r in outputs else []) for r in self._res}
-        values_dict, derivs, errors = evaluate(
+        values_dict, derivs, errors = self._evaluate(
             funcs=self._funcs, request=request, inputs=inputs,
             workers=self._num_threads, error_mode=error_mode)
         batch = x2.shape[0]
@@ -192,7 +228,7 @@ class VectorFunctionSelectiveAD:
         """
         inputs = self._inputs_from_columns(cols)
         request = {r: ((self._args + self._param_args) if r in (output,) else []) for r in self._res}
-        values_dict, derivs, errors = evaluate(
+        values_dict, derivs, errors = self._evaluate(
             funcs=self._funcs, request=request, inputs=inputs,
             workers=self._num_threads, error_mode=error_mode)
         dr = derivs[output]
@@ -207,7 +243,7 @@ class VectorFunctionSelectiveAD:
                         error_mode: "ErrorCollectionMode" = ErrorCollectionMode.NONE):
         """Forward only on inputs given as contiguous columns; values of one output (n,)."""
         inputs = self._inputs_from_columns(cols)
-        values_dict, _, _ = evaluate(funcs=self._funcs, request={r: [] for r in self._res},
+        values_dict, _, _ = self._evaluate(funcs=self._funcs, request={r: [] for r in self._res},
                                      inputs=inputs, workers=self._num_threads, error_mode=error_mode)
         return np.asarray(values_dict[output])
 
@@ -223,7 +259,7 @@ class VectorFunctionSelectiveAD:
         inputs.update(self._fixed)
         inputs.update(self._batch_params)
         request = {r: [] for r in self._res}
-        values_dict, _, errors = evaluate(
+        values_dict, _, errors = self._evaluate(
             funcs=self._funcs, request=request, inputs=inputs,
             workers=self._num_threads, error_mode=error_mode)
         batch = x2.shape[0]
