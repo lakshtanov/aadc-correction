@@ -179,20 +179,24 @@ class CorrectionDriverVec2:
             vdg_star = np.zeros(n_keep)
             dg_dt_star = np.zeros((n_keep, self.n_theta))
             active = np.arange(n_keep)
+            # Paths kept column-major: the Newton points z + du*v_i are built and passed to AADC
+            # column by column (no (n, d) temporaries, no column copies).
+            zk = np.asfortranarray(z_keep)
+            nz_v = v_i != 0.0
+
+            def columns(rows, shift):
+                return [zk[rows, j] + shift * v_i[j] if nz_v[j] else zk[rows, j] for j in range(self.d)]
+
             for newton_iter in range(self.max_newton):
                 du = u1[active] - u1_orig_k[active]
-                z_star = z_keep[active] + du[:, None] * v_i[None, :]
-
-                v_n, j_n, jt_n, _ = self.vf.evaluate_selective_theta(z_star, [ind_res])
-                g_at = v_n[:, 1 + i]  # values from all outputs
-                vdg_new = j_n[:, 0, :] @ v_i
+                g_at, vdg_new, jt_n = self.vf.newton_step_columns(columns(active, du), ind_res, v_i)
 
                 newly_converged = np.abs(g_at) < 1e-8
                 done = active[newly_converged]
                 converged[done] = True
                 vdg_star[done] = vdg_new[newly_converged]
                 if jt_n is not None:
-                    dg_dt_star[done] = jt_n[newly_converged, 0, :]
+                    dg_dt_star[done] = jt_n[newly_converged]
 
                 active = active[~newly_converged]
                 if len(active) == 0:
@@ -227,9 +231,9 @@ class CorrectionDriverVec2:
             if self.indicator_types[i] == 'jump':
                 # JUMP: discontinuity in payoff VALUE
                 # jump = V(z*+εv) - V(z*-εv)
-                v_above = self.vf.evaluate_forward(z_above)
-                v_below = self.vf.evaluate_forward(z_below)
-                jump = v_above[:, 0] - v_below[:, 0]
+                p_above = self.vf.forward_columns(columns(conv, du_conv + eps), self.payoff_res)
+                p_below = self.vf.forward_columns(columns(conv, du_conv - eps), self.payoff_res)
+                jump = p_above - p_below
 
                 for k in range(self.n_theta):
                     contrib = jump * phi_vals * dg_dt_final[:, k]
