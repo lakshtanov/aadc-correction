@@ -138,7 +138,8 @@ class CorrectionDriverVec2:
         sum_correction = np.zeros(self.n_theta)
         total_active = 0
 
-        jobs = lambda i: self._indicator_correction(i, z_all, g_all, jac_all)
+        z_cols = np.asfortranarray(z_all)             # once: columns of the paths for the Newton/jump points
+        jobs = lambda i: self._indicator_correction(i, z_all, z_cols, g_all, jac_all)
         if self.indicator_threads > 1 and self.n_ind > 1:
             with ThreadPoolExecutor(self.indicator_threads) as ex:
                 parts = list(ex.map(jobs, range(self.n_ind)))
@@ -170,7 +171,7 @@ class CorrectionDriverVec2:
             'total_active': total_active,
         }
 
-    def _indicator_correction(self, i, z_all, g_all, jac_all):
+    def _indicator_correction(self, i, z_all, z_cols, g_all, jac_all):
         """Correction sums (n_theta,) and the number of active paths for indicator i; None if inactive."""
         sum_correction = np.zeros(self.n_theta)
         v_i, norm_i = self.directions[i]
@@ -184,7 +185,8 @@ class CorrectionDriverVec2:
         if n_near == 0:
             return None
 
-        z_near = z_all[near_idx]
+        M = z_all.shape[0]
+        z_near = z_all if n_near == M else z_all[near_idx]          # all paths near: no copy
         u1_orig = z_near @ v_i
         dg_dz = jac_all[near_idx, 1 + i, :]
         vdg = dg_dz @ v_i
@@ -199,7 +201,8 @@ class CorrectionDriverVec2:
         ki = np.where(keep)[0]
         n_keep = len(ki)
 
-        z_keep = z_near[ki]
+        kept = near_idx[ki]                                          # rows of z_all
+        all_kept = n_keep == M
         u1 = u1_orig[ki].copy()
         g_vals = g_i[near_idx[ki]]
         vdg_k = vdg[ki].copy()
@@ -218,13 +221,16 @@ class CorrectionDriverVec2:
         vdg_star = np.zeros(n_keep)
         dg_dt_star = np.zeros((n_keep, self.n_theta))
         active = np.arange(n_keep)
-        # Paths kept column-major: the Newton points z + du*v_i are built and passed to AADC
-        # column by column (no (n, d) temporaries, no column copies).
-        zk = np.asfortranarray(z_keep)
+        # The Newton points z + du*v_i are built and passed to AADC column by column from the column-major
+        # copy of the paths (no (n, d) temporaries). rows: sorted subset of 0..n_keep-1; when it is all of them
+        # and every path is kept, the unshifted columns are passed as views.
         nz_v = v_i != 0.0
 
         def columns(rows, shift):
-            return [zk[rows, j] + shift * v_i[j] if nz_v[j] else zk[rows, j] for j in range(self.d)]
+            if all_kept and len(rows) == n_keep:
+                return [z_cols[:, j] + shift * v_i[j] if nz_v[j] else z_cols[:, j] for j in range(self.d)]
+            r = kept[rows]
+            return [z_cols[r, j] + shift * v_i[j] if nz_v[j] else z_cols[r, j] for j in range(self.d)]
 
         for newton_iter in range(self.max_newton):
             du = u1[active] - u1_orig_k[active]
@@ -252,7 +258,6 @@ class CorrectionDriverVec2:
             return sum_correction, n_keep
 
         du_conv = u1[conv] - u1_orig_k[conv]
-        z_star_conv = z_keep[conv] + du_conv[:, None] * v_i[None, :]
 
         vdg_final = vdg_star[conv]
         dg_dt_final = dg_dt_star[conv]
@@ -264,8 +269,6 @@ class CorrectionDriverVec2:
         phi_vals = phi_normal_vec(u1[conv]) / np.abs(vdg_final)
 
         eps = self.jump_eps
-        z_above = z_star_conv + eps * v_i[None, :]
-        z_below = z_star_conv - eps * v_i[None, :]
 
         if self.indicator_types[i] == 'jump':
             # JUMP: discontinuity in payoff VALUE
@@ -283,6 +286,9 @@ class CorrectionDriverVec2:
             # KINK: discontinuity in payoff DERIVATIVE (slope)
             # slope_jump_k = dV/dθ_k(z*+εv) - dV/dθ_k(z*-εv)
             # reverse for the payoff only
+            z_star_conv = z_all[kept[conv]] + du_conv[:, None] * v_i[None, :]
+            z_above = z_star_conv + eps * v_i[None, :]
+            z_below = z_star_conv - eps * v_i[None, :]
             _, _, jt_above, _ = self.vf.evaluate_selective_theta(z_above, [self.payoff_res])
             _, _, jt_below, _ = self.vf.evaluate_selective_theta(z_below, [self.payoff_res])
             if jt_above is not None and jt_below is not None:
