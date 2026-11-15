@@ -72,8 +72,9 @@ def compute():
 
 def plot(J, out="fig_ladder_b2"):
     import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+    plt.rcParams.update({"font.size": 15})
     r = J["rows"]; S = np.array([x["S1"] for x in r])
-    fig, axes = plt.subplots(1, 2, figsize=(11, 3.9))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.4))
     for ax, key, title in zip(axes, ("delta", "gamma"), ("Delta  ∂V/∂S₁", "Gamma  ∂²V/∂S₁²")):
         ref = np.array([x[f"ref_{key}"] for x in r]); se = np.array([x[f"ref_{key}_se"] for x in r])
         ax.plot(S, [x[f"bump_{key}"] for x in r], color="#eb6834", lw=1.4, marker="o", ms=3.5, label=f"bump, {J['N']:,} paths")
@@ -84,7 +85,7 @@ def plot(J, out="fig_ladder_b2"):
     lo, hi = np.percentile([x["ref_gamma"] for x in r], [0, 100]); pad = 0.6 * (hi - lo)
     axes[1].set_ylim(lo - pad, hi + pad)
     h, l = axes[0].get_legend_handles_labels(); fig.legend(h, l, loc="lower center", ncol=3, frameon=False)
-    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    fig.tight_layout(rect=(0, 0.1, 1, 1))
     fig.savefig(out + ".pdf"); fig.savefig(out + ".png", dpi=150)
     print(f"figures -> {out}.pdf, {out}.png")
 
