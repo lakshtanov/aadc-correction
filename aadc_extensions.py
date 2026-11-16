@@ -247,6 +247,14 @@ class VectorFunctionSelectiveAD:
                                      inputs=inputs, workers=self._num_threads, error_mode=error_mode)
         return np.asarray(values_dict[output])
 
+    def forward_columns_all(self, cols: List,
+                            error_mode: "ErrorCollectionMode" = ErrorCollectionMode.NONE):
+        """Forward only on inputs given as contiguous columns; values of all outputs (n, n_out), outputs in order."""
+        inputs = self._inputs_from_columns(cols)
+        values_dict, _, _ = self._evaluate(funcs=self._funcs, request={r: [] for r in self._res},
+                                     inputs=inputs, workers=self._num_threads, error_mode=error_mode)
+        return np.column_stack([np.asarray(values_dict[r]) for r in self._res])
+
     def evaluate_forward(self, x: Any,
                          error_mode: "ErrorCollectionMode" = ErrorCollectionMode.NONE):
         """Forward only — no reverse pass."""
