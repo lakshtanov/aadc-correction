@@ -26,7 +26,7 @@ class CorrectionDriverVec2:
 
     def __init__(self, funcs, payoff_res, z_args, theta_args,
                  indicator_res=None, indicator_types=None,
-                 skip_sigma=20.0, jump_eps=1e-7, max_newton=8, num_threads=4, indicator_threads=3,
+                 skip_sigma=None, jump_eps=1e-7, max_newton=8, num_threads=4, indicator_threads=3,
                  vector_kind="best", root_tol_u=1e-10, jump_tries=6):
         """
         Args:
@@ -43,6 +43,10 @@ class CorrectionDriverVec2:
                 hides that cost. Results do not depend on it (contributions are summed in indicator order).
             vector_kind: AADC vector workspace: "best" (AVX-512 where the CPU has it), None (engine default),
                 or "scalar" / "avx2" / "avx512". Results are bitwise identical across kinds.
+            skip_sigma: optional screening — skip a (path, indicator) pair when the LINEARISED distance |g| / |dg/du|
+                exceeds skip_sigma. Off by default (None): where g is flat at the path point the linearised
+                distance is far too large and pairs with a nearby root and a non-negligible weight phi(u*) were
+                dropped (timer option, xi = 0.5: -5% of dV/dv0).
             root_tol_u: Newton stops when the root is located to |g / dg_du| < root_tol_u along v_i
                 (|g| < 1e-8 alone is not enough where g is flat along v_i); on the last allowed step |g| < 1e-8
                 is accepted.
@@ -151,6 +155,7 @@ class CorrectionDriverVec2:
         sum_correction = np.zeros(self.n_theta)
         total_active = 0
         jump_unresolved = 0
+        newton_unconverged = 0
 
         z_cols = np.asfortranarray(z_all)             # once: columns of the paths for the Newton/jump points
         jobs = lambda i: self._indicator_correction(i, z_all, z_cols, g_all, jac_all)
@@ -162,10 +167,11 @@ class CorrectionDriverVec2:
         for i, part in enumerate(parts):              # indicator order: same sums as the sequential loop
             if part is None:
                 continue
-            contrib_i, n_keep, n_unres = part
+            contrib_i, n_keep, n_unres, n_unconv = part
             sum_correction += contrib_i
             total_active += n_keep
             jump_unresolved += n_unres
+            newton_unconverged += n_unconv
             if (i + 1) % 10 == 0:
                 print(f"  Step 2: indicator {i+1}/{self.n_ind}, "
                       f"active={total_active}")
@@ -185,6 +191,7 @@ class CorrectionDriverVec2:
             'total': total,
             'total_active': total_active,
             'jump_unresolved': jump_unresolved,
+            'newton_unconverged': newton_unconverged,
         }
 
     def _indicator_correction(self, i, z_all, z_cols, g_all, jac_all):
@@ -195,8 +202,10 @@ class CorrectionDriverVec2:
             return None
 
         g_i = g_all[:, i]
-        near_mask = np.abs(g_i) / norm_i < self.skip_sigma
-        near_idx = np.where(near_mask)[0]
+        if self.skip_sigma is None:                 # default: no screening (see skip_sigma in __init__)
+            near_idx = np.arange(len(g_i))
+        else:
+            near_idx = np.where(np.abs(g_i) / norm_i < self.skip_sigma)[0]
         n_near = len(near_idx)
         if n_near == 0:
             return None
@@ -208,9 +217,12 @@ class CorrectionDriverVec2:
         vdg = dg_dz @ v_i
 
         ok = np.abs(vdg) > 1e-15
-        ratio = np.full(n_near, np.inf)
-        ratio[ok] = np.abs(g_i[near_idx][ok]) / np.abs(vdg[ok])
-        keep = ratio < self.skip_sigma
+        if self.skip_sigma is None:
+            keep = np.ones(n_near, dtype=bool)
+        else:
+            ratio = np.full(n_near, np.inf)
+            ratio[ok] = np.abs(g_i[near_idx][ok]) / np.abs(vdg[ok])
+            keep = ratio < self.skip_sigma
         if not np.any(keep):
             return None
 
@@ -224,7 +236,8 @@ class CorrectionDriverVec2:
         vdg_k = vdg[ki].copy()
         u1_orig_k = u1_orig[ki]
 
-        step = g_vals / vdg_k
+        flat = np.abs(vdg_k) <= 1e-15                 # no slope at the path point: step towards the boundary
+        step = np.where(flat, np.sign(g_vals) * 3.0, g_vals / np.where(flat, 1.0, vdg_k))
         step = np.clip(step, -3.0, 3.0)
         u1 -= step
         converged = np.zeros(n_keep, dtype=bool)
@@ -274,8 +287,9 @@ class CorrectionDriverVec2:
         # ── Jump for converged ───────────────────────────────
         conv = np.where(converged)[0]
         n_conv = len(conv)
+        n_unconv = n_keep - n_conv                     # Newton did not converge: no contribution (counted)
         if n_conv == 0:
-            return sum_correction, n_keep, 0
+            return sum_correction, n_keep, 0, n_unconv
 
         du_conv = u1[conv] - u1_orig_k[conv]
 
@@ -284,7 +298,7 @@ class CorrectionDriverVec2:
 
         good_vdg = np.abs(vdg_final) > 1e-15
         if not np.any(good_vdg):
-            return sum_correction, n_keep, 0
+            return sum_correction, n_keep, 0, n_unconv
 
         phi_vals = phi_normal_vec(u1[conv]) / np.abs(vdg_final)
 
@@ -337,4 +351,4 @@ class CorrectionDriverVec2:
                     contrib[~use] = 0.0
                     sum_correction[k] += contrib.sum()
 
-        return sum_correction, n_keep, n_unres
+        return sum_correction, n_keep, n_unres, n_unconv
