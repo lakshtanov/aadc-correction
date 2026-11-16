@@ -26,7 +26,8 @@ class CorrectionDriverVec2:
 
     def __init__(self, funcs, payoff_res, z_args, theta_args,
                  indicator_res=None, indicator_types=None,
-                 skip_sigma=20.0, jump_eps=1e-4, max_newton=8, num_threads=4, indicator_threads=3):
+                 skip_sigma=20.0, jump_eps=1e-4, max_newton=8, num_threads=4, indicator_threads=3,
+                 vector_kind="best"):
         """
         Args:
             funcs: aadc.Functions with recorded tape.
@@ -40,6 +41,8 @@ class CorrectionDriverVec2:
                 Each aadc.evaluate call with num_threads > 1 costs ~2 ms of thread start-up, and the
                 driver makes several calls per indicator; overlapping the calls of different indicators
                 hides that cost. Results do not depend on it (contributions are summed in indicator order).
+            vector_kind: AADC vector workspace: "best" (AVX-512 where the CPU has it), None (engine default),
+                or "scalar" / "avx2" / "avx512". Results are bitwise identical across kinds.
         """
         self.funcs = funcs
         self.payoff_res = payoff_res
@@ -68,7 +71,7 @@ class CorrectionDriverVec2:
         all_res = [payoff_res] + list(indicator_res)
         self.vf = VectorFunctionSelectiveAD(
             funcs, z_args, all_res,
-            param_args=theta_args, num_threads=num_threads
+            param_args=theta_args, num_threads=num_threads, vector_kind=vector_kind
         )
 
         self.directions = None
