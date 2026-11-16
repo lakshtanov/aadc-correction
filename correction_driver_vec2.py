@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aadc_extensions import VectorFunctionSelectiveAD
 
 
+STEP_CLIP = 8.0       # max Newton step along v (rtsafe): stops a near-zero slope throwing the point far; 3 cost +3% work
 U_FAR = 40.0          # |u| beyond which phi(u) == 0 in double precision (phi(38.6) ~ 1e-324)
 
 
@@ -51,12 +52,13 @@ class CorrectionDriverVec2:
                 distance is far too large and pairs with a nearby root and a non-negligible weight phi(u*) were
                 dropped (timer option, xi = 0.5: -5% of dV/dv0).
             max_newton: Newton iterations per pair (only pairs not yet converged iterate, so a high cap is cheap).
-                Every step is clipped to +-3; a pair whose iterate leaves |u| <= 40 is dropped (phi = 0 there exactly),
+                Every step is clipped to +-STEP_CLIP; a pair whose iterate leaves |u| <= 40 is dropped (phi = 0 there exactly),
                 counted in result['newton_far']; result['newton_unconverged'] counts the others that did not converge.
                 8 was too few where g is convex and flattens towards the root (default threshold E = -log Phi(-z) of
                 a Cox model: 11% of the pairs did not converge, dV/dlambda0 lost 6%).
             root_solver: "rtsafe" (default): Newton while it converges, the Illinois method on the bracket once a
-                Newton step leaves it or makes no progress (|g| not below 0.9 x its best) twice in a row (plain Newton cycles on piecewise-smooth g such
+                Newton step leaves it or makes no progress twice in a row (|g| not below 0.9 x its best while the
+                step reverses or |g| grows) (plain Newton cycles on piecewise-smooth g such
                 as min(S_i) / S0 - B of a worst-of, and was dropping pairs whose root exists); "newton": the
                 previous plain Newton (results as before).
             root_tol_u: Newton stops when the root is located to |g / dg_du| < root_tol_u along v_i
@@ -380,7 +382,7 @@ class CorrectionDriverVec2:
 
     def _solve_rtsafe(self, active, u1, u1_orig_k, columns, ind_res, v_i, converged, vdg_star, dg_dt_star, root_err_u):
         """Root of g_i along v_i for every active pair (in place). Newton (one forward + reverse per step, steps
-        clipped to +-3) while it converges; once the root is bracketed (g < 0 and g > 0 seen) a Newton step that
+        clipped to +-STEP_CLIP) while it converges; once the root is bracketed (g < 0 and g > 0 seen) a Newton step that
         leaves the bracket or shrinks by less than half switches the pair to the Illinois method on the bracket
         (forward passes only; one forward + reverse at the root). Exits: root located to root_tol_u along v
         (converged), |u| > U_FAR (phi(u) = 0 exactly: dropped, returned count), max_newton (left unconverged).
@@ -395,6 +397,7 @@ class CorrectionDriverVec2:
         w_hist = np.full((n, 2), np.inf)                 # bracket widths after the last two bracket steps
         stall = np.zeros(n, dtype=np.int8)               # Newton steps in a row without progress
         g_best = np.full(n, np.inf)                      # smallest |g| seen in Newton mode
+        g_last = np.full(n, np.inf); step_sign = np.zeros(n, dtype=np.int8)   # previous |g| and Newton step direction
         s_c = np.zeros(n); s_g = np.zeros(n); s_r = np.zeros(n)   # search mode: centre, g(centre), radius
         n_noroot = 0
         last_move = np.full(n, np.inf)                   # size of the last bracket-mode move
@@ -458,14 +461,18 @@ class CorrectionDriverVec2:
                 done_rows.append(d)
                 rest = ~conv; r = a_n[rest]; g = g_n[rest]; dv = vdg_n[rest]
                 flat = np.abs(dv) <= 1e-15
-                step = np.clip(np.where(flat, np.sign(g) * 3.0, g / np.where(flat, 1.0, dv)), -3.0, 3.0)
+                step = np.clip(np.where(flat, np.sign(g) * STEP_CLIP, g / np.where(flat, 1.0, dv)), -STEP_CLIP, STEP_CLIP)
                 cand = u1[r] - step
                 br = np.isfinite(width[r])
                 lo = np.fmin(u_neg[r], u_pos[r]); hi = np.fmax(u_neg[r], u_pos[r])
                 # progress = |g| falls below 0.9 x the best |g| so far (monotone convergence always does;
                 # cycling, e.g. in a valley of g that does not reach 0, does not)
-                no_progress = np.abs(g) > 0.9 * g_best[r]
-                g_best[r] = np.minimum(g_best[r], np.abs(g))
+                # no progress = |g| not below 0.9 x its best AND (the step reversed direction or |g| grew):
+                # cycling does that; a monotone march towards a far root with |g| falling slowly does not
+                sgn = np.sign(step).astype(np.int8)
+                reversed_ = (step_sign[r] != 0) & (sgn != step_sign[r])
+                no_progress = (np.abs(g) > 0.9 * g_best[r]) & (reversed_ | (np.abs(g) >= g_last[r]))
+                g_best[r] = np.minimum(g_best[r], np.abs(g)); g_last[r] = np.abs(g); step_sign[r] = sgn
                 stall[r] = np.where(no_progress, stall[r] + 1, 0)
                 # bracketed: leave Newton if its step leaves the bracket or it stalled twice in a row;
                 # not bracketed and stalled twice (e.g. cycling in a valley of g that does not reach 0): search
