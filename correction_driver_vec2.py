@@ -18,6 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aadc_extensions import VectorFunctionSelectiveAD
 
 
+U_FAR = 40.0          # |u| beyond which phi(u) == 0 in double precision (phi(38.6) ~ 1e-324)
+
+
 def phi_normal_vec(x):
     return np.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
@@ -27,7 +30,7 @@ class CorrectionDriverVec2:
     def __init__(self, funcs, payoff_res, z_args, theta_args,
                  indicator_res=None, indicator_types=None,
                  skip_sigma=None, jump_eps=1e-7, max_newton=50, num_threads=4, indicator_threads=3,
-                 vector_kind="best", root_tol_u=1e-10, jump_tries=6):
+                 vector_kind="best", root_tol_u=1e-10, jump_tries=6, root_solver="rtsafe"):
         """
         Args:
             funcs: aadc.Functions with recorded tape.
@@ -48,8 +51,14 @@ class CorrectionDriverVec2:
                 distance is far too large and pairs with a nearby root and a non-negligible weight phi(u*) were
                 dropped (timer option, xi = 0.5: -5% of dV/dv0).
             max_newton: Newton iterations per pair (only pairs not yet converged iterate, so a high cap is cheap).
+                Every step is clipped to +-3; a pair whose iterate leaves |u| <= 40 is dropped (phi = 0 there exactly),
+                counted in result['newton_far']; result['newton_unconverged'] counts the others that did not converge.
                 8 was too few where g is convex and flattens towards the root (default threshold E = -log Phi(-z) of
                 a Cox model: 11% of the pairs did not converge, dV/dlambda0 lost 6%).
+            root_solver: "rtsafe" (default): Newton while it converges, the Illinois method on the bracket once a
+                Newton step leaves it or makes no progress (|g| not below 0.9 x its best) twice in a row (plain Newton cycles on piecewise-smooth g such
+                as min(S_i) / S0 - B of a worst-of, and was dropping pairs whose root exists); "newton": the
+                previous plain Newton (results as before).
             root_tol_u: Newton stops when the root is located to |g / dg_du| < root_tol_u along v_i
                 (|g| < 1e-8 alone is not enough where g is flat along v_i); on the last allowed step |g| < 1e-8
                 is accepted.
@@ -67,6 +76,9 @@ class CorrectionDriverVec2:
         self.jump_eps = jump_eps
         self.max_newton = max_newton
         self.root_tol_u = root_tol_u
+        if root_solver not in ("rtsafe", "newton"):
+            raise ValueError("root_solver: 'rtsafe' or 'newton'")
+        self.root_solver = root_solver
         self.jump_tries = jump_tries
         self.num_threads = num_threads
         self.indicator_threads = max(1, int(indicator_threads))
@@ -159,6 +171,7 @@ class CorrectionDriverVec2:
         total_active = 0
         jump_unresolved = 0
         newton_unconverged = 0
+        newton_far = 0
 
         z_cols = np.asfortranarray(z_all)             # once: columns of the paths for the Newton/jump points
         jobs = lambda i: self._indicator_correction(i, z_all, z_cols, g_all, jac_all)
@@ -170,11 +183,12 @@ class CorrectionDriverVec2:
         for i, part in enumerate(parts):              # indicator order: same sums as the sequential loop
             if part is None:
                 continue
-            contrib_i, n_keep, n_unres, n_unconv = part
+            contrib_i, n_keep, n_unres, n_unconv, n_far = part
             sum_correction += contrib_i
             total_active += n_keep
             jump_unresolved += n_unres
             newton_unconverged += n_unconv
+            newton_far += n_far
             if (i + 1) % 10 == 0:
                 print(f"  Step 2: indicator {i+1}/{self.n_ind}, "
                       f"active={total_active}")
@@ -195,6 +209,7 @@ class CorrectionDriverVec2:
             'total_active': total_active,
             'jump_unresolved': jump_unresolved,
             'newton_unconverged': newton_unconverged,
+            'newton_far': newton_far,
         }
 
     def _indicator_correction(self, i, z_all, z_cols, g_all, jac_all):
@@ -239,9 +254,12 @@ class CorrectionDriverVec2:
         vdg_k = vdg[ki].copy()
         u1_orig_k = u1_orig[ki]
 
-        flat = np.abs(vdg_k) <= 1e-15                 # no slope at the path point: step towards the boundary
-        step = np.where(flat, np.sign(g_vals) * 3.0, g_vals / np.where(flat, 1.0, vdg_k))
-        step = np.clip(step, -3.0, 3.0)
+        if self.root_solver == "newton":               # previous solver, unchanged
+            step = np.clip(g_vals / vdg_k, -3.0, 3.0)
+        else:
+            flat = np.abs(vdg_k) <= 1e-15             # no slope at the path point: step towards the boundary
+            step = np.where(flat, np.sign(g_vals) * 3.0, g_vals / np.where(flat, 1.0, vdg_k))
+            step = np.clip(step, -3.0, 3.0)
         u1 -= step
         converged = np.zeros(n_keep, dtype=bool)
 
@@ -252,6 +270,7 @@ class CorrectionDriverVec2:
         ind_res = self.indicator_res[i]
         vdg_star = np.zeros(n_keep)
         root_err_u = np.zeros(n_keep)
+        n_far = 0
         dg_dt_star = np.zeros((n_keep, self.n_theta))
         active = np.arange(n_keep)
         # The Newton points z + du*v_i are built and passed to AADC column by column from the column-major
@@ -260,39 +279,42 @@ class CorrectionDriverVec2:
         nz_v = v_i != 0.0
 
         def columns(rows, shift):
-            if all_kept and len(rows) == n_keep:
+            if all_kept and len(rows) == n_keep and rows[0] == 0 and rows[-1] == n_keep - 1 and np.all(np.diff(rows) == 1):
                 return [z_cols[:, j] + shift * v_i[j] if nz_v[j] else z_cols[:, j] for j in range(self.d)]
             r = kept[rows]
             return [z_cols[r, j] + shift * v_i[j] if nz_v[j] else z_cols[r, j] for j in range(self.d)]
 
-        for newton_iter in range(self.max_newton):
-            du = u1[active] - u1_orig_k[active]
-            g_at, vdg_new, jt_n = self.vf.newton_step_columns(columns(active, du), ind_res, v_i)
-
-            g_abs = np.abs(g_at)
-            last_step = newton_iter == self.max_newton - 1
-            newly_converged = (g_abs < 1e-8) & ((g_abs <= self.root_tol_u * np.abs(vdg_new)) | last_step)
-            done = active[newly_converged]
-            converged[done] = True
-            vdg_star[done] = vdg_new[newly_converged]
-            root_err_u[done] = g_abs[newly_converged] / np.maximum(np.abs(vdg_new[newly_converged]), 1e-300)
-            if jt_n is not None:
-                dg_dt_star[done] = jt_n[newly_converged]
-
-            active = active[~newly_converged]
-            if len(active) == 0:
-                break
-            g_at = g_at[~newly_converged]
-            vdg_new = vdg_new[~newly_converged]
-            good = np.abs(vdg_new) > 1e-15
-            u1[active[good]] -= g_at[good] / vdg_new[good]
+        if self.root_solver == "newton":
+            # previous solver (plain Newton, unclipped after the first step), kept for comparison
+            for newton_iter in range(self.max_newton):
+                du = u1[active] - u1_orig_k[active]
+                g_at, vdg_new, jt_n = self.vf.newton_step_columns(columns(active, du), ind_res, v_i)
+                g_abs = np.abs(g_at)
+                last_step = newton_iter == self.max_newton - 1
+                newly_converged = (g_abs < 1e-8) & ((g_abs <= self.root_tol_u * np.abs(vdg_new)) | last_step)
+                done = active[newly_converged]
+                converged[done] = True
+                vdg_star[done] = vdg_new[newly_converged]
+                root_err_u[done] = g_abs[newly_converged] / np.maximum(np.abs(vdg_new[newly_converged]), 1e-300)
+                if jt_n is not None:
+                    dg_dt_star[done] = jt_n[newly_converged]
+                active = active[~newly_converged]
+                if len(active) == 0:
+                    break
+                g_at = g_at[~newly_converged]
+                vdg_new = vdg_new[~newly_converged]
+                good = np.abs(vdg_new) > 1e-15
+                u1[active[good]] -= g_at[good] / vdg_new[good]
+        else:
+            n_far = self._solve_rtsafe(active, u1, u1_orig_k, columns, ind_res, v_i,
+                                       converged, vdg_star, dg_dt_star, root_err_u)
 
         # ── Jump for converged ───────────────────────────────
         conv = np.where(converged)[0]
         n_conv = len(conv)
         n_unconv = n_keep - n_conv                     # Newton did not converge: no contribution (counted)
         if n_conv == 0:
-            return sum_correction, n_keep, 0, n_unconv
+            return sum_correction, n_keep, 0, n_unconv - n_far, n_far
 
         du_conv = u1[conv] - u1_orig_k[conv]
 
@@ -301,7 +323,7 @@ class CorrectionDriverVec2:
 
         good_vdg = np.abs(vdg_final) > 1e-15
         if not np.any(good_vdg):
-            return sum_correction, n_keep, 0, n_unconv
+            return sum_correction, n_keep, 0, n_unconv - n_far, n_far
 
         phi_vals = phi_normal_vec(u1[conv]) / np.abs(vdg_final)
 
@@ -354,4 +376,139 @@ class CorrectionDriverVec2:
                     contrib[~use] = 0.0
                     sum_correction[k] += contrib.sum()
 
-        return sum_correction, n_keep, n_unres, n_unconv
+        return sum_correction, n_keep, n_unres, n_unconv - n_far, n_far
+
+    def _solve_rtsafe(self, active, u1, u1_orig_k, columns, ind_res, v_i, converged, vdg_star, dg_dt_star, root_err_u):
+        """Root of g_i along v_i for every active pair (in place). Newton (one forward + reverse per step, steps
+        clipped to +-3) while it converges; once the root is bracketed (g < 0 and g > 0 seen) a Newton step that
+        leaves the bracket or shrinks by less than half switches the pair to the Illinois method on the bracket
+        (forward passes only; one forward + reverse at the root). Exits: root located to root_tol_u along v
+        (converged), |u| > U_FAR (phi(u) = 0 exactly: dropped, returned count), max_newton (left unconverged).
+        If Newton stalls without a bracket (it can cycle in a valley of g that does not reach 0), the pair searches
+        for a sign change at centre -+ 0.25, 0.5, 1, ... (forward passes); none within 80: no root with phi > 0.
+        Returns the number of pairs dropped (|u| > U_FAR, or no sign change found)."""
+        n = len(u1)
+        mode = np.zeros(n, dtype=np.int8)                # 0 Newton, 1 Illinois on the bracket
+        u_neg = np.full(n, np.nan); g_neg = np.full(n, np.nan)
+        u_pos = np.full(n, np.nan); g_pos = np.full(n, np.nan)
+        prev_step = np.full(n, np.inf); side_last = np.zeros(n, dtype=np.int8)
+        w_hist = np.full((n, 2), np.inf)                 # bracket widths after the last two bracket steps
+        stall = np.zeros(n, dtype=np.int8)               # Newton steps in a row without progress
+        g_best = np.full(n, np.inf)                      # smallest |g| seen in Newton mode
+        s_c = np.zeros(n); s_g = np.zeros(n); s_r = np.zeros(n)   # search mode: centre, g(centre), radius
+        n_noroot = 0
+        last_move = np.full(n, np.inf)                   # size of the last bracket-mode move
+        need_final = np.zeros(n, dtype=bool)
+        n_far = 0
+        tol = self.root_tol_u
+        for it in range(self.max_newton):
+            if len(active) == 0:
+                break
+            a_n = active[mode[active] == 0]; a_b = active[mode[active] == 1]; a_s = active[mode[active] == 2]
+            # --- all forward-only points of this iteration in ONE call: bracket points, search centre -+ radius
+            if len(a_b) or len(a_s):
+                rows_f = np.concatenate([a_b, a_s, a_s])
+                shift_f = np.concatenate([u1[a_b], s_c[a_s] - s_r[a_s], s_c[a_s] + s_r[a_s]]) - u1_orig_k[rows_f]
+                g_f = self.vf.forward_columns(columns(rows_f, shift_f), ind_res)
+                nb, ns_ = len(a_b), len(a_s)
+                g_b_all, g_lo, g_hi = g_f[:nb], g_f[nb:nb + ns_], g_f[nb + ns_:]
+            # --- search mode: a sign change against g(centre) gives the bracket
+            if len(a_s):
+                sg = np.sign(s_g[a_s])
+                left = np.sign(g_lo) != sg; right = (np.sign(g_hi) != sg) & ~left
+                for side_mask, x_other, g_other in ((left, s_c[a_s] - s_r[a_s], g_lo), (right, s_c[a_s] + s_r[a_s], g_hi)):
+                    r_ = a_s[side_mask]
+                    if len(r_) == 0:
+                        continue
+                    xo, go, gc, xc = x_other[side_mask], g_other[side_mask], s_g[r_], s_c[r_]
+                    negc = gc < 0
+                    u_neg[r_] = np.where(negc, xc, xo); g_neg[r_] = np.where(negc, gc, go)
+                    u_pos[r_] = np.where(negc, xo, xc); g_pos[r_] = np.where(negc, go, gc)
+                    mode[r_] = 1; side_last[r_] = 0; u1[r_] = 0.5 * (xc + xo)
+                none = ~(left | right)
+                r_ = a_s[none]; s_r[r_] *= 2.0
+                gone = r_[s_r[r_] > 2 * U_FAR]               # no sign change within |u - centre| <= 80: no root with phi > 0
+                n_noroot += len(gone)
+                active = np.setdiff1d(active, gone, assume_unique=True)
+            # --- evaluate
+            if len(a_n):
+                g_n, vdg_n, jt_n = self.vf.newton_step_columns(columns(a_n, u1[a_n] - u1_orig_k[a_n]), ind_res, v_i)
+            if len(a_b):
+                g_b = g_b_all                    # a_b: bracket pairs at the start of this iteration, evaluated above
+            # --- bracket update (Illinois: the side kept twice in a row has its g halved)
+            for rows, g in ((a_n, g_n if len(a_n) else None), (a_b, g_b if len(a_b) else None)):
+                if g is None or len(rows) == 0:
+                    continue
+                neg, pos = g < 0, g > 0
+                r = rows[neg]; again = side_last[r] == -1; g_pos[r[again]] *= 0.5
+                u_neg[r] = u1[r]; g_neg[r] = g[neg]; side_last[r] = -1
+                r = rows[pos]; again = side_last[r] == 1; g_neg[r[again]] *= 0.5
+                u_pos[r] = u1[r]; g_pos[r] = g[pos]; side_last[r] = 1
+            width = np.abs(u_pos - u_neg)                 # nan where not bracketed
+            done_rows = []
+            # --- Newton pairs
+            if len(a_n):
+                g_abs = np.abs(g_n)
+                conv = ((g_abs < 1e-8) & (g_abs <= tol * np.abs(vdg_n))) | (width[a_n] < tol) | (g_n == 0.0)
+                d = a_n[conv]
+                converged[d] = True; vdg_star[d] = vdg_n[conv]
+                if jt_n is not None:
+                    dg_dt_star[d] = jt_n[conv]
+                root_err_u[d] = np.fmin(g_abs[conv] / np.maximum(np.abs(vdg_n[conv]), 1e-300), np.nan_to_num(width[d], nan=np.inf))
+                done_rows.append(d)
+                rest = ~conv; r = a_n[rest]; g = g_n[rest]; dv = vdg_n[rest]
+                flat = np.abs(dv) <= 1e-15
+                step = np.clip(np.where(flat, np.sign(g) * 3.0, g / np.where(flat, 1.0, dv)), -3.0, 3.0)
+                cand = u1[r] - step
+                br = np.isfinite(width[r])
+                lo = np.fmin(u_neg[r], u_pos[r]); hi = np.fmax(u_neg[r], u_pos[r])
+                # progress = |g| falls below 0.9 x the best |g| so far (monotone convergence always does;
+                # cycling, e.g. in a valley of g that does not reach 0, does not)
+                no_progress = np.abs(g) > 0.9 * g_best[r]
+                g_best[r] = np.minimum(g_best[r], np.abs(g))
+                stall[r] = np.where(no_progress, stall[r] + 1, 0)
+                # bracketed: leave Newton if its step leaves the bracket or it stalled twice in a row;
+                # not bracketed and stalled twice (e.g. cycling in a valley of g that does not reach 0): search
+                switch = br & ((cand <= lo) | (cand >= hi) | (stall[r] >= 2))
+                mode[r[switch]] = 1
+                to_search = ~br & (stall[r] >= 2)
+                rs = r[to_search]
+                mode[rs] = 2; s_c[rs] = u1[rs]; s_g[rs] = g[to_search]; s_r[rs] = 0.25
+                switch = switch | to_search
+                keep_n = ~switch
+                u1[r[keep_n]] = cand[keep_n]; prev_step[r[keep_n]] = np.abs(step[keep_n])
+            # --- bracket pairs: converged when the bracket is narrow; the root needs one Newton evaluation
+            if len(a_b):
+                fin = (width[a_b] < tol) | (g_b == 0.0) | (last_move[a_b] < tol)    # narrow bracket or the point stopped
+                need_final[a_b[fin]] = True
+                done_rows.append(a_b[fin])
+            done = np.concatenate(done_rows) if done_rows else np.zeros(0, dtype=int)
+            active = np.setdiff1d(active, done, assume_unique=True)
+            # --- next point of the pairs in bracket mode: Illinois (regula falsi with halving), midpoint if unsafe
+            r = active[mode[active] == 1]
+            if len(r):
+                lo = np.fmin(u_neg[r], u_pos[r]); hi = np.fmax(u_neg[r], u_pos[r])
+                den = g_pos[r] - g_neg[r]
+                x = np.where(den != 0.0, (u_neg[r] * g_pos[r] - u_pos[r] * g_neg[r]) / np.where(den != 0.0, den, 1.0), 0.5 * (lo + hi))
+                bad = ~((x > lo) & (x < hi))
+                # bisect when the bracket did not halve over the last two bracket steps (one-sided false position)
+                w_now = hi - lo
+                slow = w_now > 0.5 * w_hist[r, 0]
+                w_hist[r, 0] = w_hist[r, 1]; w_hist[r, 1] = w_now
+                x = np.where(bad | slow, 0.5 * (lo + hi), x)
+                last_move[r] = np.abs(x - u1[r])
+                u1[r] = x
+            # --- exit: |u| > U_FAR (Newton pairs without a bracket; bracket entirely beyond U_FAR)
+            far = (np.abs(u1[active]) > U_FAR) & (mode[active] != 2)
+            if np.any(far):
+                n_far += int(far.sum()); active = active[~far]
+        # pairs located by the bracket: one forward + reverse at the root for dg/du and dg/dtheta
+        fin = np.where(need_final)[0]
+        if len(fin):
+            g_f, vdg_f, jt_f = self.vf.newton_step_columns(columns(fin, u1[fin] - u1_orig_k[fin]), ind_res, v_i)
+            converged[fin] = True; vdg_star[fin] = vdg_f
+            if jt_f is not None:
+                dg_dt_star[fin] = jt_f
+            root_err_u[fin] = np.minimum(np.nan_to_num(np.abs(u_pos[fin] - u_neg[fin]), nan=np.inf),
+                                         np.maximum(np.abs(g_f) / np.maximum(np.abs(vdg_f), 1e-300), np.where(np.isfinite(last_move[fin]), last_move[fin], 0.0)))
+        return n_far + n_noroot
