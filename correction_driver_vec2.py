@@ -26,7 +26,7 @@ class CorrectionDriverVec2:
 
     def __init__(self, funcs, payoff_res, z_args, theta_args,
                  indicator_res=None, indicator_types=None,
-                 skip_sigma=None, jump_eps=1e-7, max_newton=8, num_threads=4, indicator_threads=3,
+                 skip_sigma=None, jump_eps=1e-7, max_newton=50, num_threads=4, indicator_threads=3,
                  vector_kind="best", root_tol_u=1e-10, jump_tries=6):
         """
         Args:
@@ -47,6 +47,9 @@ class CorrectionDriverVec2:
                 exceeds skip_sigma. Off by default (None): where g is flat at the path point the linearised
                 distance is far too large and pairs with a nearby root and a non-negligible weight phi(u*) were
                 dropped (timer option, xi = 0.5: -5% of dV/dv0).
+            max_newton: Newton iterations per pair (only pairs not yet converged iterate, so a high cap is cheap).
+                8 was too few where g is convex and flattens towards the root (default threshold E = -log Phi(-z) of
+                a Cox model: 11% of the pairs did not converge, dV/dlambda0 lost 6%).
             root_tol_u: Newton stops when the root is located to |g / dg_du| < root_tol_u along v_i
                 (|g| < 1e-8 alone is not enough where g is flat along v_i); on the last allowed step |g| < 1e-8
                 is accepted.
