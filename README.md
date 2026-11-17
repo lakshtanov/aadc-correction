@@ -53,14 +53,22 @@ Each switch provides `g` (signed distance to boundary) as a tape Result handle. 
 | Driver | Method | Bias | Speed |
 |---|---|---|---|
 | `correction_driver_vec2.py` | Fully vectorized Newton (AVX + MT) | None | 1× |
-| `correction_driver_fries.py` | Fries (2018) discretized delta | O(w) | **~6-7×** faster |
+| `correction_driver_fries.py` | Fries (2018) discretized delta | O(w) | **~2-3×** faster |
 | `rqmc.py` (`CorrectionDriverRQMC`) | Vec2 on scrambled Sobol points (see below) | None | 1× per path, far fewer paths |
 
 Both drivers are fully vectorized — no scalar workspace loops. `jac_theta` computed in batch via `aadc.evaluate()`.
 
 ### Newton (exact, unbiased)
 
-Newton root-finding in normal space → exact boundary z*, exact density φ(u*). No tuning parameter. Uses `VectorFunctionSelectiveAD` with per-indicator reverse for Newton (the same pass gives ∂g_i/∂z and ∂g_i/∂θ, so nothing extra is computed at z*), forward-only for jump.
+Root finding in normal space → exact boundary z*, exact density φ(u*). No tuning parameter. Uses `VectorFunctionSelectiveAD` with per-indicator reverse for Newton (the same pass gives ∂g_i/∂z and ∂g_i/∂θ, so nothing extra is computed at z*), forward-only for jump.
+
+Robustness — nothing is dropped silently:
+- **Root solver** (`root_solver="rtsafe"`, default): Newton with steps clipped to ±8 while it makes progress; once the root is bracketed (g < 0 and g > 0 seen) a step leaving the bracket, or no progress, switches to the Illinois method on the bracket (forward passes only, bisection if it stalls); no bracket and no progress (e.g. a valley of g that does not reach 0): search for a sign change. Plain Newton cycles across kinks such as a worst-of `min(S_i)` and lost roots that exist. `root_solver="newton"` keeps the previous plain Newton.
+- **No screening** by default (`skip_sigma=None`): skipping a pair when the *linearised* distance `|g| / |dg/du|` is large is biased where g is flat at the path point. A pair is dropped only where its contribution is exactly zero in double precision (`|u| > 40`, φ(u) = 0).
+- **Bracketed jump**: `P(z* + εv) - P(z* - εv)` is accepted only if `g_i` and no other indicator changes sign between the two points; otherwise ε is adapted (`jump_eps=1e-7`, root located to `root_tol_u=1e-10` along v).
+- **Counters** in the result: `newton_unconverged`, `newton_far` (dropped with φ = 0), `jump_unresolved` — 0 on every benchmark of this repository.
+
+Speed options: `indicator_threads=3` (indicators processed concurrently; AADC releases the GIL), `vector_kind="best"` (AVX-512 replays where the CPU has them; results bitwise identical across kinds), `num_threads` (AADC threads; best ≤ the cores of one socket).
 
 ### Fries (fast, biased)
 
@@ -72,13 +80,13 @@ Down-and-out barrier (GBM, 10 steps), 50K paths, 500K bump reference (`benchmark
 
 | Method | Delta | Error | Time |
 |---|---|---|---|
-| Newton (vec, 4 threads) | +0.8134 | 0.2% | 4.2s |
-| Fries (w=5%) | +0.8206 | 0.7% | 0.6s |
-| Fries (w=10%) | +0.8288 | 1.7% | 0.7s |
+| Newton (vec, 4 threads) | +0.8134 | 0.2% | 1.2s |
+| Fries (w=5%) | +0.8206 | 0.7% | 0.4s |
+| Fries (w=10%) | +0.8288 | 1.7% | 0.6s |
 
 Digital option (analytic reference): 0.0% error.
 
-Times: Xeon Silver 4114, process pinned to 10 physical cores of one socket, `OPENBLAS_NUM_THREADS=1`. Before #1 (full reverse over all outputs after Newton) the Newton row was 8.5s on the same machine; Fries is unchanged. On this 2×10-core box the driver is fastest with `num_threads` ≤ cores of one socket: spreading over both sockets (16-20 threads) is slower than 10.
+Times: Xeon Silver 4114, process pinned to 10 physical cores of one socket, `OPENBLAS_NUM_THREADS=1`. The Newton row was 8.5s before #1 (full reverse over all outputs after Newton) and 4.2s before #11 / #12 (indicators processed concurrently, AVX-512 replays) on the same machine. On this 2×10-core box the driver is fastest with `num_threads` ≤ cores of one socket: spreading over both sockets (16-20 threads) is slower than 10.
 
 ## Randomized QMC (Sobol)
 
@@ -108,7 +116,7 @@ Heston digital, 2^13 paths x 16 (`examples/example_heston_rqmc.py`), standard-er
 
 | variance scheme | delta | d/d(xi) | d/d(kappa) |
 |---|---|---|---|
-| Euler, `max(v, 0.1·theta)` | 1.9x | 1.3x | 1.4x |
+| Euler, `max(v, 0.1·theta)` | 2.0x | 1.3x | 1.4x |
 | drift-implicit `sqrt(v)` (no floor) | 13.7x | 16.5x | 11.3x |
 
 All numbers of the QMC slides (scheme comparison, equal time vs smoothing, paths needed for the same accuracy):
@@ -116,7 +124,7 @@ All numbers of the QMC slides (scheme comparison, equal time vs smoothing, paths
 Newton vs Fries with MC and Sobol (2-asset autocallable): `benchmarks/bench_slides_fries.py`.
 
 GBM down-and-out call, 10 dates (`tests/test_rqmc.py`): standard error 5.9x smaller than MC with
-`"active_subspace"`, 4.8x with `"bridge"`. On the Heston digital with the smooth scheme,
+`"active_subspace"`, 4.9x with `"bridge"`. On the Heston digital with the smooth scheme,
 at equal wall time the δ-correction + Sobol is 6-14x more accurate (RMSE incl. bias) than smoothing + Sobol with
 the best width chosen per budget.
 
@@ -151,10 +159,9 @@ result = driver.run(z_all)
 1. **Record** the pricing kernel with `register_switches=SWITCH_JUMP`
 2. **Discover** indicators automatically via `fn.cmp_switches()`
 3. **Precompute** gradient directions `v_i = ∇_z g_i / |∇_z g_i|` at z=0
-4. **Screen** each indicator on each path: is the path near the boundary?
-5. **Newton** root-finding along direction `v_i` to find `u*` where `g_i(z*) = 0` (one forward + one reverse of `g_i` per step; the converged step also gives `∂g_i/∂θ`)
-6. **Jump** evaluation: `P(z* + εv) - P(z* - εv)` via tape forward-only
-7. **Accumulate**: `correction_θ += jump · φ(u*) / |v·∇g| · (∂g/∂θ)`
+4. **Root** along direction `v_i`: `u*` where `g_i(z*) = 0` for every (path, indicator) pair — safeguarded Newton (one forward + one reverse of `g_i` per Newton step; the converged step also gives `∂g_i/∂θ`)
+5. **Jump** evaluation: `P(z* + εv) - P(z* - εv)` via tape forward-only, accepted only if `g_i` and no other indicator changes sign in between
+6. **Accumulate**: `correction_θ += jump · φ(u*) / |v·∇g| · (∂g/∂θ)`
 
 All steps batch-vectorized via `aadc.evaluate()` with AVX + multithreading.
 
