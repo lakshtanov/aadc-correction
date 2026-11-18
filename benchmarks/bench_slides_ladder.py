@@ -32,6 +32,7 @@ THREADS = int(os.environ.get("THREADS", "10"))
 N = int(os.environ.get("N", "4000"))
 SOBOL = os.environ.get("SOBOL", "0") == "1"
 ORDERING = os.environ.get("ORDERING", "active_subspace")      # Sobol only: "active_subspace" (option B) or "bridge" (A)
+N_PILOT = int(os.environ.get("N_PILOT", "2000"))              # option B: pilot paths for Q
 LADDER = np.arange(60.0, 130.01, 10.0 if QUICK else 2.5)
 H, H_REF = 1.0, 2.0
 REF_M = 1 if QUICK else 8
@@ -45,7 +46,7 @@ def compute():
     t = tape_b2(); fn, rP, za = t["fn"], t["rP"], t["za"]; aS1 = t["th"][0]; thv = dict(t["thv"])
     if SOBOL:
         from rqmc import CorrectionDriverRQMC
-        kw = dict(ordering="bridge", bridge_factors=t["bridge_factors"]) if ORDERING == "bridge" else dict(pilot_seed=999)
+        kw = dict(ordering="bridge", bridge_factors=t["bridge_factors"]) if ORDERING == "bridge" else dict(pilot_seed=999, n_pilot=N_PILOT)
         q = CorrectionDriverRQMC(fn, rP, za, [aS1], num_threads=THREADS, **kw)
         with contextlib.redirect_stdout(io.StringIO()):
             q.precompute_directions(thv)                   # warm-up; the second call is timed
@@ -95,7 +96,8 @@ def compute():
         print(f"S1={s:6.1f}  delta: corr {d0:+.4f}  bump {row['bump_delta']:+.4f}  ref {rd:+.4f}±{row['ref_delta_se']:.4f}   "
               f"gamma: corr {row['corr_gamma']:+.5f}  bump {row['bump_gamma']:+.5f}  ref {rg:+.5f}±{row['ref_gamma_se']:.5f}", flush=True)
     refm = json.load(open(os.environ["REF_FROM"]))["ref_paths_millions"] if REF is not None else REF_M
-    return dict(N=N, sobol=SOBOL, ordering=ORDERING if SOBOL else None, h=H, h_ref=H_REF, ref_paths_millions=refm,
+    return dict(N=N, sobol=SOBOL, ordering=ORDERING if SOBOL else None, n_pilot=N_PILOT if SOBOL and ORDERING != "bridge" else 0,
+                h=H, h_ref=H_REF, ref_paths_millions=refm,
                 t_q=t_q, t_delta=t_delta, t_price_path=t_price_path, rows=rows)
 
 
