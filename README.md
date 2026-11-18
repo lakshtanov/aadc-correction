@@ -105,9 +105,31 @@ Why it works: the correction integrates the payoff jump analytically along the N
 is gone from the per-path estimator; what is left is as smooth as the switch functions — QMC applies.
 Smoothing cannot do this: a small width makes the integrand nearly discontinuous, a large one biases it.
 
-- **Ordering** (which directions get the best Sobol coordinates; any orthogonal map keeps the estimator
-  unbiased): `"active_subspace"` (default) — automatic, from tape gradients on pilot paths, needs no knowledge of
-  the inputs; `"bridge"` — Brownian bridge, pass `bridge_factors` (tape indices per Brownian factor); `"none"`.
+- **Ordering** (which directions get the best Sobol coordinates; any orthogonal map `Q` keeps the estimator
+  unbiased, it only decides how much Sobol helps). Three choices:
+  - `"active_subspace"` (**default**, generic) — `Q` from the tape alone: `n_pilot` ordinary random paths
+    (default 2000) go through the tape once, AADC returns the gradients of the payoff and of every indicator,
+    and the eigenvectors of their averaged outer products become the Sobol coordinates, most important first.
+    Needs nothing from the user. Cost: one AADC call on the pilot paths (a forward and a reverse per indicator),
+    once per pricing setup — ~8 ms on the Heston digital (16 inputs; 6–23 ms across schemes and runs), ~0.2 s on the 3-asset autocallable
+    (31 indicators); `drv.rotation_time` reports it, and the QMC benchmarks include it in every timing.
+    Fewer pilot paths are cheaper but were measurably worse on a scheme with a (smoothed) floor
+    (about 25% larger error with 256 paths), so the default stays at 2000.
+  - `"bridge"` (**model-specific**) — Brownian bridge per factor. The driver cannot see which tape inputs are
+    the time steps of which Brownian motion, so the caller gives the layout:
+    ```python
+    drv = CorrectionDriverRQMC(fn, payoff_res, z_args, theta_args, ordering="bridge",
+                               bridge_factors=[[0, 2, 4, 6], [1, 3, 5, 7]])  # Heston: spot / variance normals
+    ```
+    `bridge_factors` lists, for each Brownian factor, the positions in `z_args` of its per-step normals in time
+    order. Inputs not listed (e.g. a normal for a default time) take the first Sobol coordinates. Only distinct,
+    in-range indices are checked: a wrong layout raises no error — the estimator stays unbiased, the Sobol gain
+    silently drops. Use it when you wrote the model loop and the inputs really are Brownian increments in time
+    order; no pilot paths, so it is free. Measured against the default: about equal on the smooth Heston scheme, worse with a
+    smoothed floor (the bridge does not see the variance directions), mixed on GBM products (2-asset autocallable
+    vega RMSE 0.5% vs 0.7%, down-and-out call standard error 4.9x vs 5.9x below MC) — see
+    `benchmarks/bench_slides_qmc.py`, `benchmarks/bench_slides_fries.py`, `tests/test_rqmc.py`.
+  - `"none"` — Sobol coordinates straight into the tape inputs (for comparison).
 - **The model discretization must be smooth.** A kink such as a variance floor `max(v, v_min)` makes ∂g/∂θ jump
   on oblique surfaces and removes most of the gain. For Heston use the drift-implicit scheme for `sqrt(v)`
   (no floor; needs `4·kappa·theta > xi²`), see `examples/example_heston_rqmc.py`.
@@ -120,7 +142,11 @@ Heston digital, 2^13 paths x 16 (`examples/example_heston_rqmc.py`), standard-er
 | drift-implicit `sqrt(v)` (no floor) | 13.7x | 16.5x | 11.3x |
 
 All numbers of the QMC slides (scheme comparison, equal time vs smoothing, paths needed for the same accuracy):
-`benchmarks/bench_slides_qmc.py` (`QUICK=1` for a short run).
+`benchmarks/bench_slides_qmc.py` (`QUICK=1` for a short run). Timings there are per estimate, warm, 10 threads;
+they include the choice of `Q` (pilot paths) but **exclude generating the inputs** (Sobol points / pseudo-random
+normals) for every method alike. This favours the methods that need many paths (smoothing): with
+`rqmc.sobol_normals` the Sobol inputs for 2^12 paths x 16 take a few ms, for 2^22 seconds.
+AADC has no random-number generators of its own; inputs are plain arrays.
 Newton vs Fries with MC and Sobol (2-asset autocallable): `benchmarks/bench_slides_fries.py`.
 
 GBM down-and-out call, 10 dates (`tests/test_rqmc.py`): standard error 5.9x smaller than MC with

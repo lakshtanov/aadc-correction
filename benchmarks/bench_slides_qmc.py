@@ -114,7 +114,8 @@ def reference(scheme):
 
 
 def run_driver(scheme):
-    """Estimates of the correction driver: {setup: [(N, mean, std, time/est)]}; setups MC, RQMC (option B,
+    """Estimates of the correction driver: {setup: [(N, mean, std, time/est)]}, time/est includes the rotation Q
+    (pilot paths of option B); setups MC, RQMC (option B,
     automatic ordering) and RQMC_bridge (option A, Brownian bridge per factor: spot normals 0, 2, 4, ...,
     variance normals 1, 3, 5, ...)."""
     fn, rP, za, th, thv = tape(scheme)
@@ -122,8 +123,10 @@ def run_driver(scheme):
     q = {"RQMC": CorrectionDriverRQMC(fn, rP, za, th, num_threads=THREADS, pilot_seed=999),
          "RQMC_bridge": CorrectionDriverRQMC(fn, rP, za, th, num_threads=THREADS, ordering="bridge",
                                              bridge_factors=[list(range(0, 2 * N_STEPS, 2)), list(range(1, 2 * N_STEPS, 2))])}
-    for d in q.values():
-        d.precompute_directions(thv)
+    for d in q.values():                       # twice: the second call is timed warm, like the estimates below
+        d.precompute_directions(thv); d.precompute_directions(thv)
+    print(f"  {scheme:12s} rotation Q (counted in every RQMC estimate): option B {q['RQMC'].rotation_time * 1e3:.1f} ms"
+          f" ({q['RQMC'].n_pilot} pilot paths), option A {q['RQMC_bridge'].rotation_time * 1e3:.1f} ms", flush=True)
     res = {"MC": [], "RQMC": [], "RQMC_bridge": []}
     for m in range(M_DRV[0], M_DRV[1] + 1):
         N = 2 ** m
@@ -135,7 +138,8 @@ def run_driver(scheme):
                 with contextlib.redirect_stdout(io.StringIO()):
                     est.append((mc if setup == "MC" else q[setup].driver).run(Z)["total"])
                 t += time.perf_counter() - t0
-            est = np.array(est); res[setup].append((N, est.mean(0), est.std(0, ddof=1), t / R))
+            t_q = 0.0 if setup == "MC" else q[setup].rotation_time     # Q is part of the cost of one estimate
+            est = np.array(est); res[setup].append((N, est.mean(0), est.std(0, ddof=1), t / R + t_q))
     return res
 
 
