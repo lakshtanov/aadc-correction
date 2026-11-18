@@ -18,6 +18,11 @@ Usage:  OPENBLAS_NUM_THREADS=1 python benchmarks/bench_slides_benchmarks.py     
         QUICK=1 ...  (a few minutes: fewer paths)       ONLY=1,3 ...  (subset)      THREADS=10 (default)
         TIMING=1 ... cost only: wall time of pathwise AAD (forward + one reverse of the payoff) vs one run of the
                      correction driver on the same paths and threads, and their ratio (the "overhead").
+        STATS=1 ...  root-finder statistics on the paths of seed 0 (numbers of the slides "Cost Analysis",
+                     "Root Finding: Safeguarded Newton", "No Screening"): tape replays per path and per
+                     (path, indicator) pair for the default solver; the same paths with plain Newton
+                     (root_solver="newton": lost roots, replays, change of the Greeks) and with the old
+                     screening skip_sigma=20 (change of the Greeks in %, same paths).
 Raw results -> bench_slides_benchmarks.json (OUT=...).
 """
 import sys, os, io, json, math, time, contextlib
@@ -181,6 +186,52 @@ def timing(t, M):
         d.run(Z)
     return t_pw, time.perf_counter() - t0
 
+
+def solver_stats(t, M, **kw):
+    """One driver run on the paths of seed 0 with replay counters: (result, n_pairs, fwd+rev rows, fwd-only rows, time).
+    A row = one path in one tape replay; a Newton step is a forward + reverse, bracket/search steps and the
+    jump are forward only."""
+    import threading
+    Z = np.random.RandomState(42).randn(M, len(t["za"]))
+    d = CorrectionDriverVec2(t["fn"], t["rP"], t["za"], t["th"], num_threads=THREADS, **kw)
+    d.precompute_directions(t["thv"])
+    cnt, lock = {"fr": 0, "f": 0}, threading.Lock()
+
+    def counted(name, key):
+        fn = getattr(d.vf, name)
+        def wrap(cols, *a, **k):
+            with lock:
+                cnt[key] += len(cols[0])
+            return fn(cols, *a, **k)
+        setattr(d.vf, name, wrap)
+    counted("newton_step_columns", "fr"); counted("forward_columns", "f"); counted("forward_columns_all", "f")
+    t0 = time.perf_counter()
+    with contextlib.redirect_stdout(io.StringIO()):
+        r = d.run(Z)
+    n_pairs = M * sum(1 for _, nrm in d.directions if nrm >= 1e-15)
+    return r, n_pairs, cnt["fr"], cnt["f"], time.perf_counter() - t0
+
+
+if __name__ == "__main__" and os.environ.get("STATS") == "1":
+    for b in ONLY:
+        title, build, (M, seeds), refM = BENCH[b]
+        t = build()
+        r0, P, fr0, f0, t_0 = solver_stats(t, M)
+        print(f"\n{title}: {M:,} paths (seed 0), {P // M} indicators, {P:,} (path, indicator) pairs, all solved")
+        print(f"  default solver: {fr0 / P:.2f} Newton steps (forward + reverse) per pair; per path {fr0 / M:.0f} "
+              f"forward + reverse and {f0 / M:.0f} forward-only replays; {t_0:.1f}s")
+        print(f"                  counters: newton_unconverged {r0['newton_unconverged']}, newton_far {r0['newton_far']}, "
+              f"jump_unresolved {r0['jump_unresolved']}")
+        r1, _, fr1, f1, t_1 = solver_stats(t, M, root_solver="newton")
+        dg = [(a - b_) / abs(b_) * 100 if b_ else float("nan") for a, b_ in zip(r1["total"], r0["total"])]
+        print(f"  plain Newton:   lost roots (newton_unconverged) {r1['newton_unconverged']}; replays per path "
+              f"{fr1 / M:.0f} + {f1 / M:.0f} (work {(fr1 + f1) / (fr0 + f0) - 1:+.1%} in rows, time {t_1 / t_0 - 1:+.0%}); "
+              f"Greeks vs default: " + ", ".join(f"{n} {x:+.2f}%" for n, x in zip(t["names"], dg)))
+        r2, *_ = solver_stats(t, M, skip_sigma=20.0)
+        dg = [(a - b_) / abs(b_) * 100 if b_ else float("nan") for a, b_ in zip(r2["total"], r0["total"])]
+        print(f"  screening skip_sigma=20: Greeks vs no screening (same paths): "
+              + ", ".join(f"{n} {x:+.2f}%" for n, x in zip(t["names"], dg)), flush=True)
+    sys.exit(0)
 
 if __name__ == "__main__" and os.environ.get("TIMING") == "1":
     print(f"{'benchmark':58s} {'paths':>8s} {'pathwise AAD':>13s} {'driver':>9s} {'overhead':>9s}")
