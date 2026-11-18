@@ -13,7 +13,9 @@ Points:   scrambled Sobol (scipy.stats.qmc, LMS + digital shift), N = 2^m, R ind
 Ordering: an orthogonal map Z = Q x from Sobol normals x to tape inputs Z (orthogonal => still N(0, I),
           unbiased for any Q). It decides which directions get the best Sobol coordinates:
             "active_subspace"  automatic, from tape gradients on pilot paths (no knowledge of the z layout)
-            "bridge"           Brownian bridge per Brownian factor (caller gives the tape indices per factor)
+            "bridge"           Brownian bridge per Brownian factor; model-specific: the caller gives the tape indices
+                               per factor (bridge_factors), only their range/uniqueness is checked — a wrong layout
+                               keeps the estimator unbiased but silently loses the Sobol gain
             "none"             Sobol coordinates straight into the tape inputs
 
 Usage:
@@ -24,6 +26,7 @@ Usage:
 """
 import io
 import math
+import time
 import contextlib
 from typing import Dict, List, Optional, Sequence
 
@@ -142,10 +145,12 @@ class CorrectionDriverRQMC:
                                            indicator_types=indicator_types, **driver_kwargs)
         self.Q = None
         self.eigen_share = None
+        self.rotation_time = 0.0               # seconds spent on Q in the last precompute_directions (pilot paths)
 
     def precompute_directions(self, theta_values: Dict):
         self.driver.precompute_directions(theta_values)
         d = len(self.z_args)
+        t0 = time.perf_counter()
         if self.ordering == "active_subspace":
             self.Q, self.eigen_share = active_subspace_rotation(
                 self.funcs, self.payoff_res, self.z_args, self.theta_args, theta_values,
@@ -154,6 +159,7 @@ class CorrectionDriverRQMC:
             self.Q = bridge_rotation(d, self.bridge_factors)
         else:
             self.Q = np.eye(d)
+        self.rotation_time = time.perf_counter() - t0
 
     def sample(self, n_paths: int, seed: int) -> np.ndarray:
         """(n_paths, d) tape inputs from scrambling `seed`."""
