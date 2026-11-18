@@ -133,6 +133,24 @@ the same 4000 paths on every point; gamma = central difference of two corrected 
 smooth in the spot for fixed paths, so the ladder is smooth at 4000 paths (RMSE vs an 8M-path bump: delta 0.006,
 gamma 0.001; bump on the same paths: 0.024, 0.045). `PLOTS=1` writes `fig_ladder_b2.pdf`.
 
+## QuantLib compatibility
+
+`tests/test_quantlib_compat.py` runs the driver on models taken from QuantLib's own processes, recorded on the AADC
+tape with the AADC build of QuantLib (`pip install aadc-quantlib-tracing`; the test is skipped without it). Use a
+separate environment: that package pins its own `aadc` version.
+
+| QuantLib process | product | Greeks | driver vs CRN bump |
+|---|---|---|---|
+| `BlackScholesMertonProcess` | down-and-out call | delta, vega | +0.1 / -1.6 sd |
+| `HestonProcess` (QE, QuantLib's default) | digital call | delta, d/d(xi) | -1.4 / -1.0 sd |
+| `HullWhiteProcess` (short rate) + GBM spot | down-and-out call | delta, d/d(sigma_r) | +1.1 / -1.0 sd |
+
+No lost root-finding pairs. QuantLib's internal comparisons appear in the switch registry too (e.g. the branches of
+the QE scheme): the driver handles them as ordinary indicators. Known issue in aadc-quantlib-tracing 1.41.4, not in
+the driver: `HestonProcess` with `FullTruncation` / `PartialTruncation` gives NaN states on the tape on paths where the
+variance went negative (the same code without the tape is finite), so a digital on the tape prices 0.25 instead of
+0.58; `QuadraticExponentialMartingale` and `Reflection` are identical to plain QuantLib. The test prints this check.
+
 ## API
 
 ```python
