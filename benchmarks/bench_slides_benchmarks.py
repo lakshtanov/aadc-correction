@@ -100,8 +100,11 @@ def tape_b2():
     rP = payoff.mark_as_output(); fn.stop_recording()
     th = [aS[0], aS[2], axi, aka]
     thv = {aS[0]: S0[0], aS[1]: S0[1], aS[2]: S0[2], axi: XI[0], aka: KAPPA[0]}   # S2 has a value, not a Greek
+    # tape layout of the independent normals (before the Cholesky / spot-vol mixing): index 2*NA*d + 2*a + k,
+    # k = 0 spot, 1 variance of asset a on date d -> one Brownian factor per (asset, k), for a Brownian bridge
+    bridge_factors = [[2 * NA * d + 2 * a + k for d in range(NOBS)] for a in range(NA) for k in (0, 1)]
     return dict(fn=fn, rP=rP, za=za, th=th, thv=thv, names=["dV/dS1", "dV/dS3", "dV/dxi1", "dV/dkappa1"],
-                h=[(0.5, 0.5, 0.005, 0.025), (1.0, 1.0, 0.01, 0.05)])
+                h=[(0.5, 0.5, 0.005, 0.025), (1.0, 1.0, 0.01, 0.05)], bridge_factors=bridge_factors)
 
 
 # ── Benchmark 3: GBM + Hull-White 1F, 50 dates ─────────────────────────────────
