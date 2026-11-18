@@ -33,14 +33,30 @@ from correction_driver_vec2 import CorrectionDriverVec2
 from aadc_extensions import VectorFunctionSelectiveAD
 
 
-def sobol_normals(n_paths: int, dim: int, seed: int) -> np.ndarray:
-    """(n_paths, dim) standard normals from one scrambled Sobol sequence; n_paths must be a power of two."""
-    from scipy.stats import qmc, norm
+def sobol_normals(n_paths: int, dim: int, seed: int, num_threads: int = 8) -> np.ndarray:
+    """(n_paths, dim) standard normals from one scrambled Sobol sequence; n_paths must be a power of two.
+
+    Points: scipy's scrambled Sobol (LMS + digital shift). Normals: scipy.special.ndtri in place, in row blocks on
+    num_threads threads (ndtri releases the GIL) -- bitwise the same numbers as norm.ppf, ~10-60x faster for
+    large n_paths. AADC itself has no random-number generators: inputs are plain arrays."""
+    from scipy.stats import qmc
+    from scipy.special import ndtri
     m = int(round(math.log2(n_paths)))
     if 2 ** m != n_paths:
         raise ValueError("n_paths must be a power of two for Sobol (balance property)")
     u = qmc.Sobol(d=dim, scramble=True, seed=seed).random_base2(m)
-    return norm.ppf(np.clip(u, 1e-15, 1.0 - 1e-15))
+
+    def to_normals(a, b):
+        np.clip(u[a:b], 1e-15, 1.0 - 1e-15, out=u[a:b]); ndtri(u[a:b], out=u[a:b])
+
+    step = max(1 << 14, -(-n_paths // max(num_threads, 1)))
+    if n_paths <= step:
+        to_normals(0, n_paths)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(num_threads) as ex:
+            list(ex.map(lambda a: to_normals(a, min(a + step, n_paths)), range(0, n_paths, step)))
+    return u
 
 
 def _bridge_increments(n_steps: int) -> np.ndarray:
@@ -159,7 +175,7 @@ class CorrectionDriverRQMC:
         """(n_paths, d) tape inputs from scrambling `seed`."""
         if self.Q is None:
             raise RuntimeError("call precompute_directions() first")
-        return sobol_normals(n_paths, len(self.z_args), seed) @ self.Q.T
+        return sobol_normals(n_paths, len(self.z_args), seed, self.num_threads) @ self.Q.T
 
     def run(self, n_paths: int, n_scramble: int = 16, seed: int = 0, verbose: bool = False) -> Dict:
         """Greeks averaged over n_scramble independent scramblings of n_paths Sobol points each.
