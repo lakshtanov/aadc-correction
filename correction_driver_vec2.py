@@ -89,6 +89,10 @@ class CorrectionDriverVec2:
         self.linear_roots = bool(linear_roots) and root_solver == "rtsafe"
         self.u_star = None
         self.jump_tries = jump_tries
+        if coins not in ("auto", "off"):
+            raise ValueError("coins: 'auto' or 'off'")
+        self.coins_mode, self.defaults = coins, list(defaults or [])
+        self.coins, self.coin_skip = None, set()
         self.num_threads = num_threads
         self.indicator_threads = max(1, int(indicator_threads))
 
@@ -194,13 +198,21 @@ class CorrectionDriverVec2:
         vals_all = np.zeros((M, n_out))
         jac_all = np.zeros((M, n_out, self.d))
         jac_theta_all = np.zeros((M, n_out, self.n_theta)) if self.n_theta > 0 else None
+        cols = None if self.vf_main is None else np.array([0] + [1 + i for i in self._main_idx])
         for start in range(0, M, BATCH):
             end = min(start + BATCH, M)
-            v_b, j_b, jt_b, _ = self.vf.evaluate(z_all[start:end])
-            vals_all[start:end] = v_b
-            jac_all[start:end] = j_b
-            if jac_theta_all is not None and jt_b is not None:
-                jac_theta_all[start:end] = jt_b
+            if cols is None:
+                v_b, j_b, jt_b, _ = self.vf.evaluate(z_all[start:end])
+                vals_all[start:end] = v_b
+                jac_all[start:end] = j_b
+                if jac_theta_all is not None and jt_b is not None:
+                    jac_theta_all[start:end] = jt_b
+            else:                                     # coin comparisons left out (zero rows, never read)
+                v_b, j_b, jt_b, _ = self.vf_main.evaluate(z_all[start:end])
+                vals_all[start:end, cols] = v_b
+                jac_all[start:end, cols] = j_b
+                if jac_theta_all is not None and jt_b is not None:
+                    jac_theta_all[start:end, cols] = jt_b
         t1 = time.time()
         print(f"  Step 1 (batch fwd+jac): {t1-t_start:.1f}s")
 
@@ -243,6 +255,11 @@ class CorrectionDriverVec2:
                 print(f"  Step 2: indicator {i+1}/{self.n_ind}, "
                       f"active={total_active}")
 
+        coin_terms = 0
+        if self.coins is not None and self.coins.exp:
+            ct = self.coins.term(z_all)
+            sum_correction += ct.sum(axis=0)
+            coin_terms = len(self.coin_skip)
         t3 = time.time()
         print(f"  Step 2 (correction): {t3-t2:.1f}s")
 
@@ -260,13 +277,14 @@ class CorrectionDriverVec2:
             'jump_unresolved': jump_unresolved,
             'newton_unconverged': newton_unconverged,
             'newton_far': newton_far,
+            'coin_comparisons': coin_terms,
         }
 
     def _indicator_correction(self, i, z_all, z_cols, g_all, jac_all):
         """Correction sums (n_theta,) and the number of active paths for indicator i; None if inactive."""
         sum_correction = np.zeros(self.n_theta)
         v_i, norm_i = self.directions[i]
-        if norm_i < 1e-15:
+        if norm_i < 1e-15 or i in self.coin_skip:          # coin comparisons: integrated exactly in run()
             return None
 
         g_i = g_all[:, i]
