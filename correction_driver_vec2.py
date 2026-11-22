@@ -31,7 +31,7 @@ class CorrectionDriverVec2:
     def __init__(self, funcs, payoff_res, z_args, theta_args,
                  indicator_res=None, indicator_types=None,
                  skip_sigma=None, jump_eps=1e-7, max_newton=50, num_threads=4, indicator_threads=3,
-                 vector_kind="best", root_tol_u=1e-10, jump_tries=6, root_solver="rtsafe"):
+                 vector_kind="best", root_tol_u=1e-10, jump_tries=6, root_solver="rtsafe", linear_roots=True):
         """
         Args:
             funcs: aadc.Functions with recorded tape.
@@ -64,6 +64,11 @@ class CorrectionDriverVec2:
             root_tol_u: Newton stops when the root is located to |g / dg_du| < root_tol_u along v_i
                 (|g| < 1e-8 alone is not enough where g is flat along v_i); on the last allowed step |g| < 1e-8
                 is accepted.
+            linear_roots: (rtsafe only) an indicator whose gradient is parallel to its direction v_i on all pilot
+                paths is a function of u = v_i . z alone (g = h(v_i . z): a barrier on a GBM, a corridor on an
+                LGM / Hull-White rate); its boundary is u = U*_i for every path. U*_i is found once (bisection on
+                the line u v_i) and used as the starting point of the solver, which then converges in one step.
+                The solver still checks the root, so a wrong detection only costs iterations, never accuracy.
             jump_eps, jump_tries: the jump is P(z* + eps v) - P(z* - eps v). It is accepted only if, between the two
                 points, indicator i changes sign and no other indicator does; otherwise eps is reduced (another
                 indicator crossed: two boundaries closer than eps) or increased (indicator i not bracketed), at
@@ -81,6 +86,8 @@ class CorrectionDriverVec2:
         if root_solver not in ("rtsafe", "newton"):
             raise ValueError("root_solver: 'rtsafe' or 'newton'")
         self.root_solver = root_solver
+        self.linear_roots = bool(linear_roots) and root_solver == "rtsafe"
+        self.u_star = None
         self.jump_tries = jump_tries
         self.num_threads = num_threads
         self.indicator_threads = max(1, int(indicator_threads))
@@ -135,6 +142,47 @@ class CorrectionDriverVec2:
             if norm > 1e-15:
                 v /= norm
             self.directions.append((v, norm))
+        if self.linear_roots:
+            self._find_linear_roots()
+
+    def _find_linear_roots(self, n_pilot=64, seed=20261124):
+        """U*_i for the indicators that are functions of v_i . z alone (see linear_roots); nan for the others."""
+        self.u_star = np.full(self.n_ind, np.nan)
+        cand = [i for i, (v, nrm) in enumerate(self.directions) if nrm > 1e-15]
+        if not cand:
+            return
+        Zp = np.random.default_rng(seed).standard_normal((n_pilot, self.d))
+        _, J, _, _ = self.vf.evaluate(Zp)                         # (n_pilot, 1 + n_ind, d)
+        lin = []
+        for i in cand:
+            v = self.directions[i][0]
+            G = J[:, 1 + i, :]; gn = np.linalg.norm(G, axis=1)
+            if np.all(gn > 1e-300) and np.all(G @ v >= gn * (1.0 - 1e-12)):   # parallel to v, same sign: monotone in u
+                lin.append(i)
+        if not lin:
+            return
+        # bisection on the lines u v_i, all linear indicators in one forward pass per iteration
+        V = np.stack([self.directions[i][0] for i in lin])        # (n_lin, d)
+        grid = np.linspace(-40.0, 40.0, 161)
+        gv = np.stack([self.vf.evaluate_forward(u * V)[np.arange(len(lin)), [1 + i for i in lin]] for u in grid], 1)
+        lo = np.full(len(lin), np.nan); hi = np.full(len(lin), np.nan)
+        for r in range(len(lin)):
+            ch = np.where(np.sign(gv[r, :-1]) != np.sign(gv[r, 1:]))[0]
+            if len(ch) == 1:                                       # monotone along v: one sign change at most
+                lo[r], hi[r] = grid[ch[0]], grid[ch[0] + 1]
+        ok = np.isfinite(lo)
+        if not ok.any():
+            return
+        idx = np.where(ok)[0]; rows = np.array([1 + lin[r] for r in idx])
+        a, b = lo[idx].copy(), hi[idx].copy()
+        ga = self.vf.evaluate_forward(a[:, None] * V[idx])[np.arange(len(idx)), rows]
+        for _ in range(60):
+            m = 0.5 * (a + b)
+            gm = self.vf.evaluate_forward(m[:, None] * V[idx])[np.arange(len(idx)), rows]
+            left = np.sign(gm) == np.sign(ga)
+            a = np.where(left, m, a); ga = np.where(left, gm, ga); b = np.where(left, b, m)
+        for r, u in zip(idx, 0.5 * (a + b)):
+            self.u_star[lin[r]] = u
 
     def run(self, z_all):
         M = z_all.shape[0]
@@ -258,6 +306,8 @@ class CorrectionDriverVec2:
 
         if self.root_solver == "newton":               # previous solver, unchanged
             step = np.clip(g_vals / vdg_k, -3.0, 3.0)
+        elif self.u_star is not None and np.isfinite(self.u_star[i]):
+            step = u1 - self.u_star[i]                  # g = h(v_i . z): the boundary is u = U*_i on every path
         else:
             flat = np.abs(vdg_k) <= 1e-15             # no slope at the path point: step towards the boundary
             step = np.where(flat, np.sign(g_vals) * 3.0, g_vals / np.where(flat, 1.0, vdg_k))
