@@ -88,6 +88,56 @@ Digital option (analytic reference): 0.0% error.
 
 Times: Xeon Silver 4114, process pinned to 10 physical cores of one socket, `OPENBLAS_NUM_THREADS=1`. The Newton row was 8.5s before #1 (full reverse over all outputs after Newton) and 4.2s before #11 / #12 (indicators processed concurrently, AVX-512 replays) on the same machine. On this 2×10-core box the driver is fastest with `num_threads` ≤ cores of one socket: spreading over both sockets (16-20 threads) is slower than 10.
 
+## Intensity default: the threshold integrated exactly (coins)
+
+In an intensity (Cox) model the default is the first step with `A_k = sum lambda dt >= E`, `E = -log Phi(-z_E) ~ Exp(1)`
+independent of everything else. The comparisons `g_k = A_k - E` are discontinuities; with the default directions every
+(path, step) pair needs Newton. `z_E` is a **coin**: an input normal that enters the payoff only through comparisons,
+each depending on it alone. Taking the correction of `g_k` along the direction of the coin (Theorem 1 allows any fixed
+direction) gives, for every path and every step,
+
+- root `z* = -Phi^{-1}(exp(-A_k))` in closed form (no Newton),
+- weight `phi(z*) / |dg_k/dz_E| = exp(-A_k)`: the density of `E` at the boundary (nothing divides by the intensity, so
+  no heavy tails when the CIR intensity violates the Feller condition),
+- jump `F(E = A_k - h) - F(E = A_k + h)` (default in step `k` minus default later), `dg_k/dtheta = dA_k/dtheta`,
+
+so the boundaries of all steps are integrated over `E` exactly: the derivative of the conditional expectation
+`sum_k (exp(-A_{k-1}) - exp(-A_k)) D_k + exp(-A_N) L`, without writing the product in that survival form.
+
+`CorrectionDriverVec2(..., coins="auto")` (default) finds coins on the tape on pilot paths: inputs with zero pathwise
+derivative of the payoff whose comparison derivatives do not change when all other inputs are redrawn (separable) and
+have one sign (monotone); all candidates are screened at once, survivors one by one; the law `-log Phi(-z)` is checked
+to 1e-8 (exact term), any other monotone law gets the delta correction along the coin (Newton). `coins="off"`: the
+default directions everywhere. Optional markup `coins.CoxDefault` (one call per step in the pricing code): the jumps
+between non-date steps come from the recorded step values and all `dA_k/dtheta` from one reverse replay (fast path,
+checked on pilot paths).
+
+Credit-linked autocallable (2 equities, CIR intensity, 104 weekly steps; `benchmarks/bench_cox_coins.py`), 16 x 10K
+paths, same paths for all modes, vs a CRN bump on 1.6e7 paths:
+
+| sigma_lambda (2 kappa theta / sigma^2) | | dV/dlambda0 | dV/dsigma_lambda | time / 10K paths |
+|---|---|---|---|---|
+| 0.10 (4) | reference | -38.98 ± 0.13 | -0.775 ± 0.017 | |
+| | `coins="off"` | -39.127 ± 0.038 | -0.7645 ± 0.010 | 47 s |
+| | coin, found on the tape | -39.129 ± 0.044 | -0.7639 ± 0.011 | 20 s |
+| | coin + `CoxDefault` markup | -39.129 ± 0.044 | -0.7639 ± 0.011 | **7 s** |
+| 0.25 (0.64) | reference | -41.46 ± 0.14 | -0.309 ± 0.017 | |
+| | `coins="off"` | -41.416 ± 0.052 | -0.2878 ± 0.013 | 48 s |
+| | coin + markup | -41.433 ± 0.058 | -0.2861 ± 0.014 | **7 s** |
+
+Scrambled Sobol (option B), 10 x 8192 paths; work = time x variance of one estimate:
+
+| sigma_lambda | Greek | Sobol gain: `coins="off"` / coin + markup | work with Sobol: `coins="off"` / coin + markup |
+|---|---|---|---|
+| 0.10 | dV/dlambda0 | 4.2x / 3.1x | 0.134 / **0.034** |
+| 0.10 | dV/dsigma_lambda | 4.4x / 3.9x | 0.0097 / **0.0019** |
+| 0.25 | dV/dlambda0 | 2.0x / 2.1x | 0.77 / **0.145** |
+| 0.25 | dV/dsigma_lambda | 3.9x / 3.7x | 0.013 / **0.0022** |
+
+Per estimate: 40 s (`coins="off"`) vs 6 s (coin + markup). Spot Greeks are identical in all modes (no coin in them).
+Not covered as is: a threshold used elsewhere in the payoff,
+or several names whose thresholds are coupled by a copula.
+
 ## Randomized QMC (Sobol)
 
 `rqmc.py` — `CorrectionDriverRQMC`: the same correction (`CorrectionDriverVec2` inside) fed with scrambled Sobol

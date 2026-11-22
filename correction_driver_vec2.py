@@ -31,7 +31,8 @@ class CorrectionDriverVec2:
     def __init__(self, funcs, payoff_res, z_args, theta_args,
                  indicator_res=None, indicator_types=None,
                  skip_sigma=None, jump_eps=1e-7, max_newton=50, num_threads=4, indicator_threads=3,
-                 vector_kind="best", root_tol_u=1e-10, jump_tries=6, root_solver="rtsafe"):
+                 vector_kind="best", root_tol_u=1e-10, jump_tries=6, root_solver="rtsafe",
+                 coins="auto", defaults=None):
         """
         Args:
             funcs: aadc.Functions with recorded tape.
@@ -64,6 +65,11 @@ class CorrectionDriverVec2:
             root_tol_u: Newton stops when the root is located to |g / dg_du| < root_tol_u along v_i
                 (|g| < 1e-8 alone is not enough where g is flat along v_i); on the last allowed step |g| < 1e-8
                 is accepted.
+            coins: "auto" (default): comparisons driven by a coin -- an input normal that only decides which side of
+                its comparisons the path is on, such as the threshold E = -log Phi(-z_E) of an intensity default --
+                are integrated over the coin exactly (root and weight in closed form, no Newton; see coins.py);
+                "off": the delta correction with the default directions on every comparison.
+            defaults: optional CoxDefault markups (coins.py) of the product: fast path of the coin term.
             jump_eps, jump_tries: the jump is P(z* + eps v) - P(z* - eps v). It is accepted only if, between the two
                 points, indicator i changes sign and no other indicator does; otherwise eps is reduced (another
                 indicator crossed: two boundaries closer than eps) or increased (indicator i not bracketed), at
@@ -82,6 +88,10 @@ class CorrectionDriverVec2:
             raise ValueError("root_solver: 'rtsafe' or 'newton'")
         self.root_solver = root_solver
         self.jump_tries = jump_tries
+        if coins not in ("auto", "off"):
+            raise ValueError("coins: 'auto' or 'off'")
+        self.coins_mode, self.defaults = coins, list(defaults or [])
+        self.coins, self.coin_skip = None, set()
         self.num_threads = num_threads
         self.indicator_threads = max(1, int(indicator_threads))
 
@@ -135,6 +145,23 @@ class CorrectionDriverVec2:
             if norm > 1e-15:
                 v /= norm
             self.directions.append((v, norm))
+        self.coins, self.coin_skip = None, set()
+        if self.coins_mode == "auto":
+            from coins import Coins
+            self.coins = Coins(self, self.defaults)
+            self.coin_skip = self.coins.setup()
+            self.coins.force_generic_directions()
+        # first pass of run(): only the payoff and the indicators solved by the delta correction (coin comparisons
+        # are integrated in closed form and need no Jacobian there)
+        self._main_idx = [i for i in range(self.n_ind) if i not in self.coin_skip]
+        if self.coin_skip:
+            self.vf_main = VectorFunctionSelectiveAD(
+                self.funcs, self.z_args, [self.payoff_res] + [self.indicator_res[i] for i in self._main_idx],
+                param_args=self.theta_args, num_threads=self.num_threads, vector_kind=self.vf._vector_kind or "auto")
+            self.vf_main.set_params(self.theta_list)
+            self.vf_main.set_fixed_inputs({a: v for a, v in theta_values.items() if a not in set(self.theta_args)})
+        else:
+            self.vf_main = None
 
     def run(self, z_all):
         M = z_all.shape[0]
@@ -146,13 +173,21 @@ class CorrectionDriverVec2:
         vals_all = np.zeros((M, n_out))
         jac_all = np.zeros((M, n_out, self.d))
         jac_theta_all = np.zeros((M, n_out, self.n_theta)) if self.n_theta > 0 else None
+        cols = None if self.vf_main is None else np.array([0] + [1 + i for i in self._main_idx])
         for start in range(0, M, BATCH):
             end = min(start + BATCH, M)
-            v_b, j_b, jt_b, _ = self.vf.evaluate(z_all[start:end])
-            vals_all[start:end] = v_b
-            jac_all[start:end] = j_b
-            if jac_theta_all is not None and jt_b is not None:
-                jac_theta_all[start:end] = jt_b
+            if cols is None:
+                v_b, j_b, jt_b, _ = self.vf.evaluate(z_all[start:end])
+                vals_all[start:end] = v_b
+                jac_all[start:end] = j_b
+                if jac_theta_all is not None and jt_b is not None:
+                    jac_theta_all[start:end] = jt_b
+            else:                                     # coin comparisons left out (zero rows, never read)
+                v_b, j_b, jt_b, _ = self.vf_main.evaluate(z_all[start:end])
+                vals_all[start:end, cols] = v_b
+                jac_all[start:end, cols] = j_b
+                if jac_theta_all is not None and jt_b is not None:
+                    jac_theta_all[start:end, cols] = jt_b
         t1 = time.time()
         print(f"  Step 1 (batch fwd+jac): {t1-t_start:.1f}s")
 
@@ -195,6 +230,11 @@ class CorrectionDriverVec2:
                 print(f"  Step 2: indicator {i+1}/{self.n_ind}, "
                       f"active={total_active}")
 
+        coin_terms = 0
+        if self.coins is not None and self.coins.exp:
+            ct = self.coins.term(z_all)
+            sum_correction += ct.sum(axis=0)
+            coin_terms = len(self.coin_skip)
         t3 = time.time()
         print(f"  Step 2 (correction): {t3-t2:.1f}s")
 
@@ -212,13 +252,14 @@ class CorrectionDriverVec2:
             'jump_unresolved': jump_unresolved,
             'newton_unconverged': newton_unconverged,
             'newton_far': newton_far,
+            'coin_comparisons': coin_terms,
         }
 
     def _indicator_correction(self, i, z_all, z_cols, g_all, jac_all):
         """Correction sums (n_theta,) and the number of active paths for indicator i; None if inactive."""
         sum_correction = np.zeros(self.n_theta)
         v_i, norm_i = self.directions[i]
-        if norm_i < 1e-15:
+        if norm_i < 1e-15 or i in self.coin_skip:          # coin comparisons: integrated exactly in run()
             return None
 
         g_i = g_all[:, i]
