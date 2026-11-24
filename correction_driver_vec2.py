@@ -31,7 +31,8 @@ class CorrectionDriverVec2:
     def __init__(self, funcs, payoff_res, z_args, theta_args,
                  indicator_res=None, indicator_types=None,
                  skip_sigma=None, jump_eps=1e-7, max_newton=50, num_threads=4, indicator_threads=3,
-                 vector_kind="best", root_tol_u=1e-10, jump_tries=6, root_solver="rtsafe", linear_roots=True):
+                 vector_kind="best", root_tol_u=1e-10, jump_tries=6, root_solver="rtsafe", linear_roots=True,
+                 coins="auto", defaults=None):
         """
         Args:
             funcs: aadc.Functions with recorded tape.
@@ -69,6 +70,11 @@ class CorrectionDriverVec2:
                 LGM / Hull-White rate); its boundary is u = U*_i for every path. U*_i is found once (bisection on
                 the line u v_i) and used as the starting point of the solver, which then converges in one step.
                 The solver still checks the root, so a wrong detection only costs iterations, never accuracy.
+            coins: "auto" (default): comparisons driven by a coin -- an input normal that only decides which side of
+                its comparisons the path is on, such as the threshold E = -log Phi(-z_E) of an intensity default --
+                are integrated over the coin exactly (root and weight in closed form, no Newton; see coins.py);
+                "off": the delta correction with the default directions on every comparison.
+            defaults: optional CoxDefault markups (coins.py) of the product: fast path of the coin term.
             jump_eps, jump_tries: the jump is P(z* + eps v) - P(z* - eps v). It is accepted only if, between the two
                 points, indicator i changes sign and no other indicator does; otherwise eps is reduced (another
                 indicator crossed: two boundaries closer than eps) or increased (indicator i not bracketed), at
@@ -146,6 +152,12 @@ class CorrectionDriverVec2:
             if norm > 1e-15:
                 v /= norm
             self.directions.append((v, norm))
+        self.coins, self.coin_skip = None, set()
+        if self.coins_mode == "auto":
+            from coins import Coins
+            self.coins = Coins(self, self.defaults)
+            self.coin_skip = self.coins.setup()
+            self.coins.force_generic_directions()
         if self.linear_roots:
             self._find_linear_roots()
 
