@@ -151,57 +151,53 @@ class CorrectionDriverVec2:
             self.coins = Coins(self, self.defaults)
             self.coin_skip = self.coins.setup()
             self.coins.force_generic_directions()
-        # first pass of run(): only the payoff and the indicators solved by the delta correction (coin comparisons
-        # are integrated in closed form and need no Jacobian there)
-        self._main_idx = [i for i in range(self.n_ind) if i not in self.coin_skip]
-        if self.coin_skip:
-            self.vf_main = VectorFunctionSelectiveAD(
-                self.funcs, self.z_args, [self.payoff_res] + [self.indicator_res[i] for i in self._main_idx],
-                param_args=self.theta_args, num_threads=self.num_threads, vector_kind=self.vf._vector_kind or "auto")
-            self.vf_main.set_params(self.theta_list)
-            self.vf_main.set_fixed_inputs({a: v for a, v in theta_values.items() if a not in set(self.theta_args)})
-        else:
-            self.vf_main = None
 
     def run(self, z_all):
         M = z_all.shape[0]
         t_start = time.time()
 
-        # ── Step 1: Batch forward + full jac_z + jac_theta (chunked) ──
-        BATCH = 5000
+        # ── Step 1: one forward + reverse over the paths, in batches. Per indicator only its directional
+        # derivative v_i . grad_z g_i is kept (that is all the solver needs at the path point); the payoff gets
+        # its theta-derivatives (pathwise Greeks). Memory O(paths x indicators), not O(paths x indicators x d).
         n_out = 1 + self.n_ind
         vals_all = np.zeros((M, n_out))
-        jac_all = np.zeros((M, n_out, self.d))
-        jac_theta_all = np.zeros((M, n_out, self.n_theta)) if self.n_theta > 0 else None
-        cols = None if self.vf_main is None else np.array([0] + [1 + i for i in self._main_idx])
+        vdg_all = np.zeros((M, self.n_ind))
+        pw_sum = np.zeros(self.n_theta)
+        main = [i for i in range(self.n_ind) if i not in self.coin_skip and self.directions[i][1] > 1e-15]
+        nz = {i: np.nonzero(self.directions[i][0])[0] for i in main}
+        need = sorted({j for i in main for j in nz[i]})
+        zargs_needed = [self.z_args[j] for j in need]
+        BATCH = int(max(256, min(5000, 2.0e8 / max(1, (1 + len(main)) * max(1, len(need))))))
+        req = {self.payoff_res: list(self.theta_args)}
+        req.update({self.indicator_res[i]: [] for i in range(self.n_ind) if i not in self.coin_skip})   # values
+        req.update({self.indicator_res[i]: zargs_needed for i in main})                                  # + reverse
+        fixed = {a: float(v) for a, v in self.theta_values.items()}
         for start in range(0, M, BATCH):
             end = min(start + BATCH, M)
-            if cols is None:
-                v_b, j_b, jt_b, _ = self.vf.evaluate(z_all[start:end])
-                vals_all[start:end] = v_b
-                jac_all[start:end] = j_b
-                if jac_theta_all is not None and jt_b is not None:
-                    jac_theta_all[start:end] = jt_b
-            else:                                     # coin comparisons left out (zero rows, never read)
-                v_b, j_b, jt_b, _ = self.vf_main.evaluate(z_all[start:end])
-                vals_all[start:end, cols] = v_b
-                jac_all[start:end, cols] = j_b
-                if jac_theta_all is not None and jt_b is not None:
-                    jac_theta_all[start:end, cols] = jt_b
+            inp = {a: np.ascontiguousarray(z_all[start:end, j]) for j, a in enumerate(self.z_args)}
+            inp.update(fixed)
+            vals, ders, _ = self.vf._evaluate(self.funcs, req, inp, self.num_threads)
+            vals_all[start:end, 0] = vals[self.payoff_res]
+            for i in range(self.n_ind):
+                if i not in self.coin_skip:
+                    vals_all[start:end, 1 + i] = vals[self.indicator_res[i]]
+            for i in main:
+                v_i = self.directions[i][0]; d_i = ders[self.indicator_res[i]]
+                acc = np.zeros(end - start)
+                for j in nz[i]:
+                    acc += np.asarray(d_i[self.z_args[j]]) * v_i[j]
+                vdg_all[start:end, i] = acc
+            for q, a in enumerate(self.theta_args):
+                pw_sum[q] += float(np.sum(np.asarray(ders[self.payoff_res][a])))
         t1 = time.time()
-        print(f"  Step 1 (batch fwd+jac): {t1-t_start:.1f}s")
+        print(f"  Step 1 (batch fwd + directional derivatives): {t1-t_start:.1f}s")
 
         prices = vals_all[:, 0]
         g_all = vals_all[:, 1:]
         price = prices.mean()
-
-        # ── Step 1b: Pathwise dV/dθ — now from jac_theta, no scalar loop ──
-        if jac_theta_all is not None:
-            pathwise = jac_theta_all[:, 0, :].mean(axis=0)  # payoff is output 0
-        else:
-            pathwise = np.zeros(self.n_theta)
+        pathwise = pw_sum / M
         t2 = time.time()
-        print(f"  Step 1b (pathwise from jac_theta): {t2-t1:.3f}s")
+        print(f"  Step 1b (pathwise): {t2-t1:.3f}s")
 
         # ── Step 2: Per-indicator correction ──────────────────────────
         sum_correction = np.zeros(self.n_theta)
@@ -211,7 +207,7 @@ class CorrectionDriverVec2:
         newton_far = 0
 
         z_cols = np.asfortranarray(z_all)             # once: columns of the paths for the Newton/jump points
-        jobs = lambda i: self._indicator_correction(i, z_all, z_cols, g_all, jac_all)
+        jobs = lambda i: self._indicator_correction(i, z_all, z_cols, g_all, vdg_all)
         if self.indicator_threads > 1 and self.n_ind > 1:
             with ThreadPoolExecutor(self.indicator_threads) as ex:
                 parts = list(ex.map(jobs, range(self.n_ind)))
@@ -255,7 +251,7 @@ class CorrectionDriverVec2:
             'coin_comparisons': coin_terms,
         }
 
-    def _indicator_correction(self, i, z_all, z_cols, g_all, jac_all):
+    def _indicator_correction(self, i, z_all, z_cols, g_all, vdg_all):
         """Correction sums (n_theta,) and the number of active paths for indicator i; None if inactive."""
         sum_correction = np.zeros(self.n_theta)
         v_i, norm_i = self.directions[i]
@@ -274,8 +270,7 @@ class CorrectionDriverVec2:
         M = z_all.shape[0]
         z_near = z_all if n_near == M else z_all[near_idx]          # all paths near: no copy
         u1_orig = z_near @ v_i
-        dg_dz = jac_all[near_idx, 1 + i, :]
-        vdg = dg_dz @ v_i
+        vdg = vdg_all[near_idx, i]                     # v_i . grad_z g_i at the path points
 
         ok = np.abs(vdg) > 1e-15
         if self.skip_sigma is None:
