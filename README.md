@@ -138,6 +138,28 @@ Per estimate: 40 s (`coins="off"`) vs 6 s (coin + markup). Spot Greeks are ident
 Not covered as is: a threshold used elsewhere in the payoff,
 or several names whose thresholds are coupled by a copula.
 
+## Daily monitoring: range accrual on a 3M rate (LGM) with a default
+
+`benchmarks/bench_lgm_range_accrual.py`: LGM / Hull-White one factor (exact Ornstein-Uhlenbeck step, flat 3% curve,
+a = 0.03, sigma_r = 0.01), index = 3M simple rate from the closed-form zero bond, corridor 2%..4% observed every day
+for one year (252 steps, 504 comparisons), quarterly coupon 5% a year x days in the corridor / 63, CIR intensity
+(correlation 0.3 with the rate) and a Cox default (252 steps, integrated over the threshold: coin with the
+`CoxDefault` markup). The model, the bond formula and the payoff are written out in the module docstring.
+
+Reference: CRN central bump on 8M paths. The bump of a discontinuous payoff is biased, O(h^2): for dV/dsigma_r the
+steps h/2, h, 2h give -160.418, -159.884, -157.698 (differences 1 : 4), Richardson -160.60; with h = 0.001 (10% of
+sigma_r) alone the reference would look 9 standard errors away from the driver. Driver, 8 x 4096 paths:
+
+| Greek | reference | Sobol (option B) | Sobol gain over MC |
+|---|---|---|---|
+| dV/dR0 | -101.58 (Richardson) | -101.667 ± 0.018 | 5.2x |
+| dV/dsigma_r | -160.60 (Richardson) | -160.518 ± 0.012 | 19.9x |
+| dV/dlambda0 | -37.58 ± 0.18 | -37.4506 ± 0.0005 | 78x |
+| dV/dsigma_lambda | +0.000 ± 0.022 | +0.0294 ± 0.0005 | 41x |
+
+One estimate on 4096 paths takes about 100 s (10 threads): with daily monitoring the delta correction costs
+(indicators x tape length); Sobol is the main lever here.
+
 ## Randomized QMC (Sobol)
 
 `rqmc.py` — `CorrectionDriverRQMC`: the same correction (`CorrectionDriverVec2` inside) fed with scrambled Sobol
