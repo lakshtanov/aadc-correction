@@ -268,15 +268,16 @@ class VectorFunctionSelectiveAD:
         (n, n_theta) or None. No (n, d) Jacobian is built and no input column is copied.
         """
         inputs = self._inputs_from_columns(cols)
-        request = {r: ((self._args + self._param_args) if r in (output,) else []) for r in self._res}
+        # only this output, and only its adjoints along the nonzero entries of the direction (and theta)
+        nz = [(a, vj) for a, vj in zip(self._args, direction) if vj != 0.0]
+        request = {output: [a for a, _ in nz] + self._param_args}
         values_dict, derivs, errors = self._evaluate(
             funcs=self._funcs, request=request, inputs=inputs,
             workers=self._num_threads, error_mode=error_mode)
         dr = derivs[output]
         dg_dir = np.zeros(len(cols[0]))
-        for a, vj in zip(self._args, direction):
-            if vj != 0.0:
-                dg_dir += dr[a] * vj
+        for a, vj in nz:
+            dg_dir += dr[a] * vj
         dg_dt = np.column_stack([dr[a] for a in self._param_args]) if self._param_args else None
         return np.asarray(values_dict[output]), dg_dir, dg_dt
 
@@ -284,7 +285,7 @@ class VectorFunctionSelectiveAD:
                         error_mode: "ErrorCollectionMode" = ErrorCollectionMode.NONE):
         """Forward only on inputs given as contiguous columns; values of one output (n,)."""
         inputs = self._inputs_from_columns(cols)
-        values_dict, _, _ = self._evaluate(funcs=self._funcs, request={r: [] for r in self._res},
+        values_dict, _, _ = self._evaluate(funcs=self._funcs, request={output: []},
                                      inputs=inputs, workers=self._num_threads, error_mode=error_mode)
         return np.asarray(values_dict[output])
 
