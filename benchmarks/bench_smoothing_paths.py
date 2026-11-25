@@ -20,6 +20,7 @@ import numpy as np
 import aadc
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..")); sys.path.insert(0, os.path.dirname(__file__))
 from rqmc import CorrectionDriverRQMC
+from aadc_extensions import compile_tape
 
 PROD = os.environ.get("PRODUCT", "credit")
 THREADS = int(os.environ.get("THREADS", "10"))
@@ -76,6 +77,7 @@ def chunks(src, N, r):
 rows = {"smoothing + MC": [], "smoothing + Sobol": []}
 for eps in EPS:
     t = P.record(False, smooth=eps)
+    compile_tape(t["fn"])                                        # compiled kernels, as for the correction
     for src in ("MC", "Sobol"):
         for m in range(M_LO, M_HI + 1):
             N = 2 ** m; est, tm = [], 0.0

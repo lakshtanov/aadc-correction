@@ -87,6 +87,8 @@ for name, kw in MODES.items():
             res.append(dict(N=N, mean=est.mean(0).tolist(), std=est.std(0, ddof=1).tolist(), time=tm / R))
             print(f"  {name} + {src} N=2^{m}: std " + " ".join(f"{x:.3g}" for x in est.std(0, ddof=1)) + f"  {tm/R:.1f}s", flush=True)
         rows[f"{name} + {src}"] = res
+from aadc_extensions import compile_tape
+compile_tape(t["fn"])                                              # the bump replays the compiled tape too
 # bump: per-path standard deviation of the CRN central difference, and the time of its replays per path
 BUMP_M = int(os.environ.get("BUMP_M", "200000"))
 Z = np.random.default_rng(20261126).standard_normal((BUMP_M, d_args)); base = {a: np.ascontiguousarray(Z[:, j]) for j, a in enumerate(t["za"])}
