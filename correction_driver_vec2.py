@@ -46,7 +46,8 @@ class CorrectionDriverVec2:
                 Each aadc.evaluate call with num_threads > 1 costs ~2 ms of thread start-up, and the
                 driver makes several calls per indicator; overlapping the calls of different indicators
                 hides that cost. Results do not depend on it (contributions are summed in indicator order).
-            vector_kind: AADC vector workspace: "best" (AVX-512 where the CPU has it), None (engine default),
+            vector_kind: AADC vector workspace: "best" (the tape is compiled -- aadc_extensions.compile_tape --
+                and replayed on the workspace of its kernels; 5x faster than the interpreter), None (engine default),
                 or "scalar" / "avx2" / "avx512". Results are bitwise identical across kinds.
             skip_sigma: optional screening — skip a (path, indicator) pair when the LINEARISED distance |g| / |dg/du|
                 exceeds skip_sigma. Off by default (None): where g is flat at the path point the linearised
@@ -133,7 +134,7 @@ class CorrectionDriverVec2:
         theta_set = set(self.theta_args)
         self.vf.set_fixed_inputs({a: v for a, v in theta_values.items() if a not in theta_set})
 
-        ws = self.funcs.create_workspace()
+        ws = self.funcs.create_workspace("scalar")        # 1 lane: after compile_tape() the default is vector
         for j in range(self.d):
             ws.set_val(self.z_args[j], 0.0)
         for arg, val in theta_values.items():
