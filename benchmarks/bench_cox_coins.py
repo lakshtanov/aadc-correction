@@ -39,8 +39,24 @@ NAMES = ["dV/dS1", "dV/dS2", "dV/dlambda0", "dV/dsigma_lambda"]
 H_REF = [0.5, 0.5, 0.004, 0.02]
 
 
-def record(markup=False):
-    """Tape; inputs: S1, S2, lambda0, sigma_lambda, then normals z1 (N), z2 (N), z_lambda (N), z_E."""
+SMOOTH_SCALE = {"default": THE_L * dt, "equity": VOL[0] * math.sqrt(13 * dt)}  # per-step hazard; sd of S/S0 between dates
+
+
+def step_fn(smooth, kind):
+    """1{x >= 0}, or with smoothing (benchmarks/bench_smoothing_paths.py) a logistic of width smooth x SMOOTH_SCALE[kind]."""
+    if smooth is None:
+        return lambda x: aadc.iif(x >= c(0.0), c(1.0), c(0.0))
+    w = 2.0 * smooth * SMOOTH_SCALE[kind]
+    return lambda x: c(0.5) * (c(1.0) + aadc.math.tanh(x / c(w)))
+
+
+def record(markup=False, smooth=None, conditional=False):
+    """Tape; inputs: S1, S2, lambda0, sigma_lambda, then normals z1 (N), z2 (N), z_lambda (N), z_E.
+    smooth: None (indicators) or eps: every indicator replaced by a logistic of width eps x SMOOTH_SCALE.
+    conditional: the default threshold integrated out exactly -- the indicator of a default in step k replaced by its
+    conditional probability given survival, 1 - exp(-lambda dt) (the payoff is linear in the alive flag), so alive is
+    the survival probability exp(-Lambda_k) and z_E drops out of the payoff."""
+    H_def, H_eq = step_fn(smooth, "default"), step_fn(smooth, "equity")
     fn = aadc.Functions(); fn.start_recording(register_switches=aadc.SWITCH_JUMP)
     s1 = c(S0[0]); a_s1 = s1.mark_as_input()
     s2 = c(S0[1]); a_s2 = s2.mark_as_input()
@@ -62,22 +78,24 @@ def record(markup=False):
         S2 = S2 * aadc.math.exp(c((R_RATE - 0.5 * VOL[1] ** 2) * dt) + c(VOL[1] * sq) * (c(CORR) * z1[k - 1] + c(rc) * z2[k - 1]))
         df = math.exp(-R_RATE * k * dt)
         pay_k = c(REC * NOTIONAL * df) * aadc.math.min(S1 / c(S0[0]), one)
-        if markup:
+        if conditional:
+            hit = one - aadc.math.exp(-lam * c(dt))
+        elif markup:
             hit = dflt.step(k, A_prev=Lam, rate=lam, dt=dt, threshold=E, alive=alive, pay=pay_k, on_date=(k in DATE_STEPS))
         else:
-            hit = aadc.iif(Lam + lam * c(dt) >= E, one, zero)
+            hit = H_def(Lam + lam * c(dt) - E)
         P = P + alive * hit * pay_k
         alive = alive * (one - hit)
         Lam = Lam + lam * c(dt)
         if k in DATE_STEPS:
             worst = aadc.math.min(S1 / c(S0[0]), S2 / c(S0[1]))
-            P = P + alive * aadc.iif(worst > c(CB), one, zero) * c(CPN * NOTIONAL * df)
+            P = P + alive * H_eq(worst - c(CB)) * c(CPN * NOTIONAL * df)
             if k < N:
-                ac = aadc.iif(worst >= c(AB), one, zero)
+                ac = H_eq(worst - c(AB))
                 P = P + alive * ac * c(NOTIONAL * df)
                 alive = alive * (one - ac)
             else:
-                above = aadc.iif(worst >= c(KI), one, zero)
+                above = H_eq(worst - c(KI))
                 P = P + alive * (above * c(NOTIONAL) + (one - above) * c(NOTIONAL) * worst) * c(df)
     if markup:
         dflt.finalize()

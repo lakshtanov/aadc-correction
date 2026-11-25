@@ -52,8 +52,21 @@ NAMES = ["dV/dR0", "dV/dsigma_r", "dV/dlambda0", "dV/dsigma_lambda"]
 H_REF = [0.001, 0.001, 0.004, 0.02]
 
 
-def record(markup=True):
-    """Tape; inputs: R0, sigma_r, lambda0, sigma_lambda, then normals z_r (N), z_lambda (N), z_E."""
+SMOOTH_SCALE = {"default": THE_L * dt, "rate": SIG_R * math.sqrt(dt)}  # per-step hazard; daily sd of the rate
+
+
+def step_fn(smooth, kind):
+    """1{x >= 0}, or with smoothing (benchmarks/bench_smoothing_paths.py) a logistic of width smooth x SMOOTH_SCALE[kind]."""
+    if smooth is None:
+        return lambda x: aadc.iif(x >= c(0.0), c(1.0), c(0.0))
+    w = 2.0 * smooth * SMOOTH_SCALE[kind]
+    return lambda x: c(0.5) * (c(1.0) + aadc.math.tanh(x / c(w)))
+
+
+def record(markup=True, smooth=None):
+    """Tape; inputs: R0, sigma_r, lambda0, sigma_lambda, then normals z_r (N), z_lambda (N), z_E.
+    smooth: None (indicators) or eps: every indicator replaced by a logistic of width eps x SMOOTH_SCALE."""
+    H_def, H_r = step_fn(smooth, "default"), step_fn(smooth, "rate")
     fn = aadc.Functions(); fn.start_recording(register_switches=aadc.SWITCH_JUMP)
     r0 = c(R0); a_r0 = r0.mark_as_input()
     sr = c(SIG_R); a_sr = sr.mark_as_input()
@@ -83,14 +96,14 @@ def record(markup=True):
         if markup:
             hit = dflt.step(k, A_prev=Lam, rate=lam, dt=dt, threshold=E, alive=alive, pay=pay_k, on_date=(k in DATE_STEPS))
         else:
-            hit = aadc.iif(Lam + lam * c(dt) >= E, one, zero)
+            hit = H_def(Lam + lam * c(dt) - E)
         P = P + alive * hit * pay_k
         alive = alive * (one - hit)
         Lam = Lam + lam * c(dt)
         V = sr * sr * c((1 - math.exp(-2 * a * t)) / (2 * a))
         logP = -r0 * c(TAU) - c(B) * x - c(0.5 * B * B) * V - c(B / (2 * a * a) * (1 - math.exp(-a * t)) ** 2) * sr * sr
         L = (aadc.math.exp(-logP) - one) / c(TAU)
-        acc = acc + aadc.iif(L > c(LO), one, zero) * aadc.iif(L < c(HI), one, zero)
+        acc = acc + H_r(L - c(LO)) * H_r(c(HI) - L)
         if k in DATE_STEPS:
             P = P + alive * c(CPN_Q * NOTIONAL / QUARTER) * acc * D
             acc = zero
