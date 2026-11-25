@@ -29,6 +29,46 @@ except ImportError:
         NONE = None
 
 
+_COMPILED: Dict[int, Any] = {}          # id(funcs) -> (funcs, workspace kind of its compiled kernels)
+
+
+def _licence_features() -> Dict[str, bool]:
+    try:
+        import aadc
+        return dict(aadc.license_status().get("features", {}))
+    except Exception:
+        return {}
+
+
+def compile_tape(funcs) -> Optional[str]:
+    """Compile the tape's kernels once (per Functions object) and return the vector workspace they run on.
+
+    Without compiled kernels every replay runs in AADC's interpreter: on the credit autocallable of the benchmarks
+    5x slower per tape pass (23.5 vs 4.2 us/path on one thread). Kernels are used only when the workspace kind
+    matches the backend, so the backend and the workspace are chosen together: 'avx512' kernels on an 'avx512'
+    workspace when the licence has the 'avx512' feature; otherwise the free vector JIT ('jit') on an 'avx2'
+    workspace (x86-64). Returns None when nothing could be compiled (the caller keeps its uncompiled default).
+    Results are bitwise identical to the interpreter. aadc.evaluate() without a workspace argument also uses the
+    compiled kernels once this has been called."""
+    key = id(funcs)
+    if key in _COMPILED:
+        return _COMPILED[key][1]
+    kind = None
+    if hasattr(funcs, "compile") and _evaluate_core is not None and platform.machine().lower() in ("x86_64", "amd64"):
+        tries = ([("avx512", "avx512")] if _licence_features().get("avx512") and _best_vector_kind() == "avx512" else [])
+        tries.append(("jit", "avx2"))
+        for backend, workspace in tries:
+            try:
+                r = funcs.compile(backend)
+            except Exception:
+                continue
+            if r.get("forward_kernels", 0) > 0:
+                kind = workspace
+                break
+    _COMPILED[key] = (funcs, kind)          # keeps funcs alive: the id cannot be reused by another tape
+    return kind
+
+
 def _best_vector_kind():
     """'avx512' on x86-64 Linux CPUs with AVX-512F, else None (engine default)."""
     try:
@@ -47,12 +87,13 @@ class VectorFunctionSelectiveAD:
     def __init__(self, funcs: Functions, args: Any, res: Any, *,
                  param_args: Any = (), batch_param_args: Any = (),
                  num_threads: int = 1, vector_kind: Any = "best") -> None:
-        """vector_kind: AADC vector workspace for the batched replays: "best" (AVX-512 where the CPU has it,
-        else the engine default), None / "auto" (engine default), or "scalar" / "avx2" / "avx512".
+        """vector_kind: AADC vector workspace for the batched replays: "best" (compile the tape -- compile_tape() --
+        and use the workspace of its kernels; if nothing compiles, AVX-512 where the CPU has it, else the engine
+        default), None / "auto" (engine default), or "scalar" / "avx2" / "avx512" (no compilation).
         Results are bitwise identical across kinds; only speed changes."""
         self._funcs = funcs
-        if vector_kind == "best":
-            vector_kind = _best_vector_kind()
+        if vector_kind == "best":           # compiled kernels and their workspace; else the widest uncompiled one
+            vector_kind = compile_tape(funcs) or _best_vector_kind()
         self._vector_kind = None if vector_kind in (None, "auto") or _evaluate_core is None else vector_kind
         self._args = list(np.ravel(np.asarray(args, dtype=object)))
         self._res = list(np.ravel(np.asarray(res, dtype=object)))
@@ -227,15 +268,16 @@ class VectorFunctionSelectiveAD:
         (n, n_theta) or None. No (n, d) Jacobian is built and no input column is copied.
         """
         inputs = self._inputs_from_columns(cols)
-        request = {r: ((self._args + self._param_args) if r in (output,) else []) for r in self._res}
+        # only this output, and only its adjoints along the nonzero entries of the direction (and theta)
+        nz = [(a, vj) for a, vj in zip(self._args, direction) if vj != 0.0]
+        request = {output: [a for a, _ in nz] + self._param_args}
         values_dict, derivs, errors = self._evaluate(
             funcs=self._funcs, request=request, inputs=inputs,
             workers=self._num_threads, error_mode=error_mode)
         dr = derivs[output]
         dg_dir = np.zeros(len(cols[0]))
-        for a, vj in zip(self._args, direction):
-            if vj != 0.0:
-                dg_dir += dr[a] * vj
+        for a, vj in nz:
+            dg_dir += dr[a] * vj
         dg_dt = np.column_stack([dr[a] for a in self._param_args]) if self._param_args else None
         return np.asarray(values_dict[output]), dg_dir, dg_dt
 
@@ -243,7 +285,7 @@ class VectorFunctionSelectiveAD:
                         error_mode: "ErrorCollectionMode" = ErrorCollectionMode.NONE):
         """Forward only on inputs given as contiguous columns; values of one output (n,)."""
         inputs = self._inputs_from_columns(cols)
-        values_dict, _, _ = self._evaluate(funcs=self._funcs, request={r: [] for r in self._res},
+        values_dict, _, _ = self._evaluate(funcs=self._funcs, request={output: []},
                                      inputs=inputs, workers=self._num_threads, error_mode=error_mode)
         return np.asarray(values_dict[output])
 
