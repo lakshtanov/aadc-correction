@@ -8,6 +8,8 @@ eps x SMOOTH_SCALE (record(smooth=eps) in bench_cox_coins.py / bench_lgm_range_a
 default, the sd of S/S0 between dates, the daily sd of the rate); pathwise AAD. For every target the best eps of the
 grid is taken (an oracle in favour of smoothing). MC, and scrambled Sobol with the same rotation as the correction
 (option B, CorrectionDriverRQMC; its pilot time not charged to smoothing). R repetitions per (eps, N).
+With a known tape layout (benchmarks 1-3, PRODUCT=b1|b2|b3) smoothing + Sobol uses the Brownian bridge (option A,
+no pilot), as in the Heston-digital table.
 RMSE = sqrt(std^2 (R-1)/R + (mean - ref)^2), ref = |Greek| of benchmarks/bench_paths_for_accuracy.py (REF_JSON: its
 OUT file; the correction is unbiased). Time: 10 threads, generation of the random inputs excluded.
 Usage: OPENBLAS_NUM_THREADS=1 PRODUCT=credit REF_JSON=paths_credit.json python benchmarks/bench_smoothing_paths.py
@@ -28,6 +30,17 @@ CHUNK = 1 << 17
 if PROD == "credit":
     import bench_cox_coins as P
     GREEKS = [2, 3, 0]                                          # dV/dlambda0, dV/dsigma_lambda, dV/dS1
+elif PROD in ("b1", "b2", "b3"):                                # benchmarks 1-3 (bench_slides_benchmarks.py)
+    import bench_slides_benchmarks as SB
+    _tape = getattr(SB, f"tape_{PROD}")
+
+    class P:                                                    # the same interface as the event products
+        NAMES = _tape()["names"]
+
+        @staticmethod
+        def record(markup=False, smooth=None):
+            return _tape(smooth=smooth)
+    GREEKS = list(range(len(P.NAMES)))
 else:
     import bench_lgm_range_accrual as P
     GREEKS = [0, 1, 2]                                          # dV/dR0, dV/dsigma_r, dV/dlambda0
@@ -37,7 +50,9 @@ assert ref_json["names"] == NAMES, (ref_json["names"], NAMES)
 REF = np.array(ref_json["greek"])
 
 t0 = P.record(False)
-q = CorrectionDriverRQMC(t0["fn"], t0["rP"], t0["za"], t0["th"], num_threads=THREADS, pilot_seed=999)
+BRIDGE = t0.get("bridge_factors")                               # known layout: smoothing + Sobol with a Brownian
+q = CorrectionDriverRQMC(t0["fn"], t0["rP"], t0["za"], t0["th"], num_threads=THREADS, pilot_seed=999,   # bridge (as
+                         **(dict(ordering="bridge", bridge_factors=BRIDGE) if BRIDGE else {}))           # Table 3)
 with contextlib.redirect_stdout(io.StringIO()):
     q.precompute_directions(t0["thv"])
 d_args = len(t0["za"])
