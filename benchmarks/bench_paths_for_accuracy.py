@@ -28,6 +28,11 @@ from rqmc import CorrectionDriverRQMC
 PROD = os.environ.get("PRODUCT", "credit")
 THREADS = int(os.environ.get("THREADS", "10"))
 R = int(os.environ.get("R", "10"))
+R_HI, M_RSWITCH = int(os.environ.get("R_HI", str(R))), int(os.environ.get("M_RSWITCH", "99"))   # fewer reps at large N
+STOP = float(os.environ.get("STOP_TARGET", "0"))       # > 0: stop doubling N once every Greek has std <= STOP |mean|
+N_PILOT = int(os.environ.get("N_PILOT", "2000"))
+ONLY_MODES = os.environ.get("MODES")                    # e.g. "coin": keep only the modes whose name contains it
+NO_OPTION_A = os.environ.get("NO_OPTION_A") == "1"
 if PROD == "credit":
     import bench_cox_coins as P
     t = P.record(True); GREEKS = [2, 3, 0]                     # dV/dlambda0, dV/dsigma_lambda, dV/dS1
@@ -58,11 +63,13 @@ def make(kw):
     return d
 
 
-q = CorrectionDriverRQMC(t["fn"], t["rP"], t["za"], t["th"], num_threads=THREADS, pilot_seed=999)
+if ONLY_MODES:
+    MODES = {k: v for k, v in MODES.items() if ONLY_MODES in k}
+q = CorrectionDriverRQMC(t["fn"], t["rP"], t["za"], t["th"], num_threads=THREADS, pilot_seed=999, n_pilot=N_PILOT)
 with contextlib.redirect_stdout(io.StringIO()):
     q.precompute_directions(t["thv"])
 SOURCES = {"MC": None, "Sobol": q}                                 # Sobol = option B (pilot paths: rotation_time)
-if t.get("bridge_factors"):                                        # option A: Brownian bridge on the known layout
+if t.get("bridge_factors") and not NO_OPTION_A:                   # option A: Brownian bridge on the known layout
     qa = CorrectionDriverRQMC(t["fn"], t["rP"], t["za"], t["th"], num_threads=THREADS, ordering="bridge",
                               bridge_factors=t["bridge_factors"])
     with contextlib.redirect_stdout(io.StringIO()):
@@ -76,16 +83,18 @@ for name, kw in MODES.items():
     for src, qq in SOURCES.items():
         res = []
         for m in range(M_LO, m_hi + 1):
-            N = 2 ** m; est, tm = [], 0.0
-            for r in range(R):
+            N = 2 ** m; est, tm = [], 0.0; RR = R_HI if m >= M_RSWITCH else R
+            for r in range(RR):
                 Z = np.random.default_rng(10_000 * m + r).standard_normal((N, d_args)) if qq is None else qq.sample(N, r)
                 t0 = time.perf_counter()
                 with contextlib.redirect_stdout(io.StringIO()):
                     o = d.run(Z)
                 tm += time.perf_counter() - t0; est.append(np.asarray(o["total"])[GREEKS])
             est = np.array(est)
-            res.append(dict(N=N, mean=est.mean(0).tolist(), std=est.std(0, ddof=1).tolist(), time=tm / R))
-            print(f"  {name} + {src} N=2^{m}: std " + " ".join(f"{x:.3g}" for x in est.std(0, ddof=1)) + f"  {tm/R:.1f}s", flush=True)
+            res.append(dict(N=N, mean=est.mean(0).tolist(), std=est.std(0, ddof=1).tolist(), time=tm / RR, R=RR))
+            print(f"  {name} + {src} N=2^{m}: std " + " ".join(f"{x:.3g}" for x in est.std(0, ddof=1)) + f"  {tm/RR:.1f}s (R={RR})", flush=True)
+            if STOP > 0 and np.all(est.std(0, ddof=1) <= STOP * np.abs(est.mean(0))):
+                break
         rows[f"{name} + {src}"] = res
 from aadc_extensions import compile_tape
 compile_tape(t["fn"])                                              # the bump replays the compiled tape too
