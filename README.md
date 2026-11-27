@@ -69,7 +69,7 @@ Robustness — nothing is dropped silently:
 - **Bracketed jump**: `P(z* + εv) - P(z* - εv)` is accepted only if `g_i` and no other indicator changes sign between the two points; otherwise ε is adapted (`jump_eps=1e-7`, root located to `root_tol_u=1e-10` along v).
 - **Counters** in the result: `newton_unconverged`, `newton_far` (dropped with φ = 0), `jump_unresolved` — 0 on every benchmark of this repository.
 
-Speed options: `indicator_threads=3` (indicators processed concurrently; AADC releases the GIL), `vector_kind="best"` (AVX-512 replays where the CPU has them; results bitwise identical across kinds), `num_threads` (AADC threads; best ≤ the cores of one socket).
+Speed options: `indicator_threads=3` (indicators processed concurrently; AADC releases the GIL), `num_threads` (AADC threads; best ≤ the cores of one socket), `vector_kind="best"`: the tape is **compiled** once (`aadc_extensions.compile_tape`: the `avx512` backend where the licence has that feature, else the free vector JIT `jit`) and replayed on the workspace of its kernels (`avx2` for `jit`). Without compiled kernels every replay runs in AADC's interpreter (an AVX-512 workspace on an unlicensed build, for example). The driver also asks AADC only for what it uses: a Newton step requests its own output and the adjoints along the nonzero entries of its direction. Results are bitwise identical; one driver run on the benchmarks of the paper became 1.2–2.3× faster (B1 3.34 → 1.65 s, B2 1.60 → 0.87 s, B3 1.92 → 0.97 s, credit autocallable with the coin 5.71 → 2.52 s, LGM range accrual 39.9 → 33.3 s). `indicator_workers` sets the AADC workers per concurrent indicator job (default `num_threads`; splitting them was slower).
 
 ### Fries (fast, biased)
 
