@@ -232,6 +232,33 @@ the same 4000 paths on every point; gamma = central difference of two corrected 
 smooth in the spot for fixed paths, so the ladder is smooth at 4000 paths (RMSE vs an 8M-path bump: delta 0.006,
 gamma 0.001; bump on the same paths: 0.024, 0.045). `PLOTS=1` writes `fig_ladder_b2.pdf`.
 
+## Paths and time for a given accuracy (all benchmarks)
+
+`benchmarks/bench_paths_for_accuracy.py` and `benchmarks/bench_smoothing_paths.py` give, for benchmarks 1–5, the paths and
+the time per estimate (10 threads, compiled tape, generation of the random inputs excluded) needed to reach an RMSE of
+1% and of 0.5% of each Greek:
+
+* **correction** (unbiased: RMSE = standard deviation) with MC, Sobol option B (its one-off pilot of 512 paths reported
+  separately) and option A where the layout is known; N doubled from 2^8 until every Greek reaches the target; 32
+  repetitions (16 from 2^15). On the credit autocallable 8–10 scramblings underestimated the Sobol standard deviation
+  about 2× (heavy tails), hence 32.
+* **smoothing**: every indicator replaced by a logistic of width eps × a natural scale (`record(smooth=eps)` in the
+  benchmark tapes; unsmoothed tapes unchanged bitwise), pathwise AAD, N up to 2^23; the RMSE includes the bias; for each
+  target the best eps of the grid (an oracle in its favour) and the time of one estimate per eps of the grid at that N
+  (the least a user spends to choose eps).
+
+```
+OPENBLAS_NUM_THREADS=1 PRODUCT=b1 R=32 R_HI=16 M_RSWITCH=15 STOP_TARGET=0.005 N_PILOT=512 M_LO=8 M_HI=20 \
+    OUT=paths_b1.json python benchmarks/bench_paths_for_accuracy.py          # PRODUCT=b1|b2|b3|credit|lgm (credit: MODES=coin)
+OPENBLAS_NUM_THREADS=1 PRODUCT=b1 REF_JSON=paths_b1.json EPS=0.01,0.03,0.1,0.3,1,3,10 M_LO=10 M_HI=23 R=16 \
+    OUT=smooth_b1.json python benchmarks/bench_smoothing_paths.py
+```
+
+In short (with the eps search counted): the correction is faster on the vegas of the barrier options at 0.5% and on
+every credit Greek (credit autocallable: 2K paths, 1.2 s for 1% on dV/dlambda0, where smoothing needs ~70M paths or
+cannot reach the target at all); smoothing is faster on deltas and on the rate Greeks, and on the 3-asset Phoenix, where
+Sobol helps the correction little (open problem). The full tables are in the paper draft.
+
 ## QuantLib compatibility
 
 `tests/test_quantlib_compat.py` runs the driver on models taken from QuantLib's own processes, recorded on the AADC
