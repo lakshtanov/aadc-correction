@@ -168,7 +168,7 @@ if __name__ == "__main__":
     if os.environ.get("SOBOL") == "1":
         from rqmc import CorrectionDriverRQMC
         R, NP = int(os.environ.get("R", "8")), int(os.environ.get("N", "4096"))
-        q = CorrectionDriverRQMC(t["fn"], t["rP"], t["za"], t["th"], num_threads=THREADS, pilot_seed=999)
+        q = CorrectionDriverRQMC(t["fn"], t["rP"], t["za"], t["th"], num_threads=THREADS, pilot_seed=999, n_pilot=int(os.environ.get("N_PILOT", "2000")))
         with contextlib.redirect_stdout(io.StringIO()):
             q.precompute_directions(t["thv"])
         est = {s: [] for s in ("MC", "Sobol")}; tm = {s: 0.0 for s in est}
