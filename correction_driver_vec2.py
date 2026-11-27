@@ -31,7 +31,7 @@ class CorrectionDriverVec2:
     def __init__(self, funcs, payoff_res, z_args, theta_args,
                  indicator_res=None, indicator_types=None,
                  skip_sigma=None, jump_eps=1e-7, max_newton=50, num_threads=4, indicator_threads=3,
-                 vector_kind="best", root_tol_u=1e-10, jump_tries=6, root_solver="rtsafe", linear_roots=True,
+                 vector_kind="best", indicator_workers=None, root_tol_u=1e-10, jump_tries=6, root_solver="rtsafe", linear_roots=True,
                  coins="auto", defaults=None):
         """
         Args:
@@ -43,10 +43,13 @@ class CorrectionDriverVec2:
                 from funcs.cmp_switches() (requires register_switches at recording).
             indicator_types: list of 'jump' or 'kink'. If None, auto-discovered.
             indicator_threads: indicators processed concurrently (Python threads; AADC releases the GIL).
+            indicator_workers: AADC workers of each concurrent indicator job; None: num_threads (measured faster
+                than splitting num_threads among the jobs). Results do not depend on it.
                 Each aadc.evaluate call with num_threads > 1 costs ~2 ms of thread start-up, and the
                 driver makes several calls per indicator; overlapping the calls of different indicators
                 hides that cost. Results do not depend on it (contributions are summed in indicator order).
-            vector_kind: AADC vector workspace: "best" (AVX-512 where the CPU has it), None (engine default),
+            vector_kind: AADC vector workspace: "best" (the tape is compiled -- aadc_extensions.compile_tape --
+                and replayed on the workspace of its kernels; 5x faster than the interpreter), None (engine default),
                 or "scalar" / "avx2" / "avx512". Results are bitwise identical across kinds.
             skip_sigma: optional screening — skip a (path, indicator) pair when the LINEARISED distance |g| / |dg/du|
                 exceeds skip_sigma. Off by default (None): where g is flat at the path point the linearised
@@ -100,6 +103,7 @@ class CorrectionDriverVec2:
         self.coins_mode, self.defaults = coins, list(defaults or [])
         self.coins, self.coin_skip = None, set()
         self.num_threads = num_threads
+        self.indicator_workers = indicator_workers
         self.indicator_threads = max(1, int(indicator_threads))
 
         # Auto-discover indicators from switch registry
@@ -133,7 +137,7 @@ class CorrectionDriverVec2:
         theta_set = set(self.theta_args)
         self.vf.set_fixed_inputs({a: v for a, v in theta_values.items() if a not in theta_set})
 
-        ws = self.funcs.create_workspace()
+        ws = self.funcs.create_workspace("scalar")        # 1 lane: after compile_tape() the default is vector
         for j in range(self.d):
             ws.set_val(self.z_args[j], 0.0)
         for arg, val in theta_values.items():
@@ -152,6 +156,12 @@ class CorrectionDriverVec2:
             if norm > 1e-15:
                 v /= norm
             self.directions.append((v, norm))
+        # AADC workers of each concurrent indicator job (default num_threads: splitting num_threads among the jobs
+        # was measured slower)
+        import copy
+        self.vf_ind = copy.copy(self.vf)
+        if self.indicator_workers is not None:
+            self.vf_ind._num_threads = int(self.indicator_workers)
         self.coins, self.coin_skip = None, set()
         if self.coins_mode == "auto":
             from coins import Coins
@@ -218,7 +228,7 @@ class CorrectionDriverVec2:
         BATCH = int(max(256, min(5000, 2.0e8 / max(1, (1 + len(main)) * max(1, len(need))))))
         req = {self.payoff_res: list(self.theta_args)}
         req.update({self.indicator_res[i]: [] for i in range(self.n_ind) if i not in self.coin_skip})   # values
-        req.update({self.indicator_res[i]: zargs_needed for i in main})                                  # + reverse
+        req.update({self.indicator_res[i]: [self.z_args[j] for j in nz[i]] for i in main})              # + reverse
         fixed = {a: float(v) for a, v in self.theta_values.items()}
         for start in range(0, M, BATCH):
             end = min(start + BATCH, M)
@@ -376,7 +386,7 @@ class CorrectionDriverVec2:
             # previous solver (plain Newton, unclipped after the first step), kept for comparison
             for newton_iter in range(self.max_newton):
                 du = u1[active] - u1_orig_k[active]
-                g_at, vdg_new, jt_n = self.vf.newton_step_columns(columns(active, du), ind_res, v_i)
+                g_at, vdg_new, jt_n = self.vf_ind.newton_step_columns(columns(active, du), ind_res, v_i)
                 g_abs = np.abs(g_at)
                 last_step = newton_iter == self.max_newton - 1
                 newly_converged = (g_abs < 1e-8) & ((g_abs <= self.root_tol_u * np.abs(vdg_new)) | last_step)
@@ -424,8 +434,8 @@ class CorrectionDriverVec2:
         for _ in range(self.jump_tries):
             if len(todo) == 0:
                 break
-            up = self.vf.forward_columns_all(columns(conv[todo], du_conv[todo] + eps[todo]))
-            dn = self.vf.forward_columns_all(columns(conv[todo], du_conv[todo] - eps[todo]))
+            up = self.vf_ind.forward_columns_all(columns(conv[todo], du_conv[todo] + eps[todo]))
+            dn = self.vf_ind.forward_columns_all(columns(conv[todo], du_conv[todo] - eps[todo]))
             flips = (up[:, 1:] >= 0.0) != (dn[:, 1:] >= 0.0)
             own = flips[:, i]
             others = flips.sum(axis=1) - own
@@ -454,8 +464,8 @@ class CorrectionDriverVec2:
             z_star_conv = z_all[kept[conv]] + du_conv[:, None] * v_i[None, :]
             z_above = z_star_conv + eps[:, None] * v_i[None, :]
             z_below = z_star_conv - eps[:, None] * v_i[None, :]
-            _, _, jt_above, _ = self.vf.evaluate_selective_theta(z_above, [self.payoff_res])
-            _, _, jt_below, _ = self.vf.evaluate_selective_theta(z_below, [self.payoff_res])
+            _, _, jt_above, _ = self.vf_ind.evaluate_selective_theta(z_above, [self.payoff_res])
+            _, _, jt_below, _ = self.vf_ind.evaluate_selective_theta(z_below, [self.payoff_res])
             if jt_above is not None and jt_below is not None:
                 slope_jump = jt_above[:, 0, :] - jt_below[:, 0, :]  # (n_conv, n_theta)
                 for k in range(self.n_theta):
@@ -498,7 +508,7 @@ class CorrectionDriverVec2:
             if len(a_b) or len(a_s):
                 rows_f = np.concatenate([a_b, a_s, a_s])
                 shift_f = np.concatenate([u1[a_b], s_c[a_s] - s_r[a_s], s_c[a_s] + s_r[a_s]]) - u1_orig_k[rows_f]
-                g_f = self.vf.forward_columns(columns(rows_f, shift_f), ind_res)
+                g_f = self.vf_ind.forward_columns(columns(rows_f, shift_f), ind_res)
                 nb, ns_ = len(a_b), len(a_s)
                 g_b_all, g_lo, g_hi = g_f[:nb], g_f[nb:nb + ns_], g_f[nb + ns_:]
             # --- search mode: a sign change against g(centre) gives the bracket
@@ -521,7 +531,7 @@ class CorrectionDriverVec2:
                 active = np.setdiff1d(active, gone, assume_unique=True)
             # --- evaluate
             if len(a_n):
-                g_n, vdg_n, jt_n = self.vf.newton_step_columns(columns(a_n, u1[a_n] - u1_orig_k[a_n]), ind_res, v_i)
+                g_n, vdg_n, jt_n = self.vf_ind.newton_step_columns(columns(a_n, u1[a_n] - u1_orig_k[a_n]), ind_res, v_i)
             if len(a_b):
                 g_b = g_b_all                    # a_b: bracket pairs at the start of this iteration, evaluated above
             # --- bracket update (Illinois: the side kept twice in a row has its g halved)
@@ -598,7 +608,7 @@ class CorrectionDriverVec2:
         # pairs located by the bracket: one forward + reverse at the root for dg/du and dg/dtheta
         fin = np.where(need_final)[0]
         if len(fin):
-            g_f, vdg_f, jt_f = self.vf.newton_step_columns(columns(fin, u1[fin] - u1_orig_k[fin]), ind_res, v_i)
+            g_f, vdg_f, jt_f = self.vf_ind.newton_step_columns(columns(fin, u1[fin] - u1_orig_k[fin]), ind_res, v_i)
             converged[fin] = True; vdg_star[fin] = vdg_f
             if jt_f is not None:
                 dg_dt_star[fin] = jt_f
