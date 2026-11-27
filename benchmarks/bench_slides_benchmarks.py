@@ -38,10 +38,19 @@ OUT = os.environ.get("OUT", "bench_slides_benchmarks.json")
 c = aadc.idouble
 
 
+def _step(smooth, scale):
+    """1{x > 0}, or with smoothing (benchmarks/bench_smoothing_paths.py) a logistic of width smooth x scale."""
+    if smooth is None:
+        return lambda x: aadc.iif(x > c(0.0), c(1.0), c(0.0))
+    w = 2.0 * smooth * scale
+    return lambda x: c(0.5) * (c(1.0) + aadc.math.tanh(x / c(w)))
+
+
 # ── Benchmark 1: GBM down-and-out call, 50 dates ───────────────────────────────
-def tape_b1():
+def tape_b1(smooth=None):
     S0, K, B, sig, r, T, N = 100.0, 90.0, 80.0, 0.25, 0.05, 1.0, 50
     dt = T / N
+    H = _step(smooth, S0 * sig * math.sqrt(dt))                  # smoothing scale: sd of S over one step
     fn = aadc.Functions(); fn.start_recording(register_switches=aadc.SWITCH_JUMP)
     S = c(S0); aS = S.mark_as_input()
     vol = c(sig); av = vol.mark_as_input()
@@ -49,15 +58,15 @@ def tape_b1():
     logS, alive = aadc.math.log(S), c(1.0)
     for j in range(N):
         logS = logS + (c(r) - c(0.5) * vol * vol) * c(dt) + vol * c(math.sqrt(dt)) * Z[j]
-        alive = alive * aadc.iif(aadc.math.exp(logS) > c(B), c(1.0), c(0.0))
+        alive = alive * H(aadc.math.exp(logS) - c(B))
     P = alive * aadc.math.max(aadc.math.exp(logS) - c(K), c(0.0)) * c(math.exp(-r * T))
     rP = P.mark_as_output(); fn.stop_recording()
     return dict(fn=fn, rP=rP, za=za, th=[aS, av], thv={aS: S0, av: sig}, names=["dV/dS0", "dV/dsigma"],
-                h=[(0.5, 0.0025), (1.0, 0.005)])
+                h=[(0.5, 0.0025), (1.0, 0.005)], bridge_factors=[list(range(N))])
 
 
 # ── Benchmark 2: 3-asset Heston Phoenix, Alfonsi scheme ────────────────────────
-def tape_b2():
+def tape_b2(smooth=None):
     NA, S0, VOL = 3, [100.0] * 3, [0.20, 0.25, 0.22]
     V0 = [v * v for v in VOL]; THETA = list(V0); KAPPA = [2.0] * 3; XI = [0.3, 0.35, 0.32]
     RHO_SV = [-0.7, -0.65, -0.7]; CORR, R, T, NOBS = 0.5, 0.03, 2.0, 8
@@ -65,6 +74,7 @@ def tape_b2():
     for a in range(NA):
         assert 4 * KAPPA[a] * THETA[a] > XI[a] ** 2, "Alfonsi scheme needs 4 kappa theta > xi^2"
     dt = T / NOBS
+    H = _step(smooth, VOL[0] * math.sqrt(dt))                    # smoothing scale: sd of S/S0 between two dates
     L = np.linalg.cholesky(np.full((NA, NA), CORR) + (1 - CORR) * np.eye(NA))
     fn = aadc.Functions(); fn.start_recording(register_switches=aadc.SWITCH_JUMP)
     S = [c(s) for s in S0]; aS = [s.mark_as_input() for s in S]
@@ -96,9 +106,9 @@ def tape_b2():
         for a in range(1, NA):
             worst = aadc.iif(perf[a] < worst, perf[a], worst)
         df = math.exp(-R * (d + 1) * dt)
-        payoff = payoff + alive * aadc.iif(worst > c(CB), c(1.0), c(0.0)) * c(CR * NOT * df)
+        payoff = payoff + alive * H(worst - c(CB)) * c(CR * NOT * df)
         if d < NOBS - 1:
-            ac = aadc.iif(worst > c(AB), c(1.0), c(0.0))
+            ac = H(worst - c(AB))
             payoff = payoff + alive * ac * c(NOT * df)
             alive = alive * (c(1.0) - ac)
     payoff = payoff + alive * c(NOT * math.exp(-R * T))
@@ -113,10 +123,11 @@ def tape_b2():
 
 
 # ── Benchmark 3: GBM + Hull-White 1F, 50 dates ─────────────────────────────────
-def tape_b3():
+def tape_b3(smooth=None):
     S0, K, B, sig, r0, T, N = 100.0, 90.0, 80.0, 0.25, 0.05, 1.0, 50
     a_hw, sr0, rho = 0.1, 0.01, -0.3
     dt = T / N
+    H = _step(smooth, S0 * sig * math.sqrt(dt))
     fn = aadc.Functions(); fn.start_recording(register_switches=aadc.SWITCH_JUMP)
     S = c(S0); aS = S.mark_as_input()
     vol = c(sig); av = vol.mark_as_input()
@@ -130,12 +141,13 @@ def tape_b3():
         logS = logS + (r_t - c(0.5) * vol * vol) * c(dt) + vol * c(math.sqrt(dt)) * z1
         r_t = r_t + c(a_hw) * (r0i - r_t) * c(dt) + sr * c(math.sqrt(dt)) * w2
         disc = disc + r_t * c(dt)
-        alive = alive * aadc.iif(aadc.math.exp(logS) > c(B), c(1.0), c(0.0))
+        alive = alive * H(aadc.math.exp(logS) - c(B))
     P = alive * aadc.math.exp(-disc) * aadc.math.max(aadc.math.exp(logS) - c(K), c(0.0))
     rP = P.mark_as_output(); fn.stop_recording()
     return dict(fn=fn, rP=rP, za=za, th=[aS, av, ar, asr], thv={aS: S0, av: sig, ar: r0, asr: sr0},
                 names=["dV/dS0", "dV/dsigma", "dV/dr0", "dV/dsigma_r"],
-                h=[(0.5, 0.0025, 0.0005, 0.0005), (1.0, 0.005, 0.001, 0.001)])
+                h=[(0.5, 0.0025, 0.0005, 0.0005), (1.0, 0.005, 0.001, 0.001)],
+                bridge_factors=[list(range(0, 2 * N, 2)), list(range(1, 2 * N, 2))])
 
 
 BENCH = {1: ("Benchmark 1: down-and-out call, GBM, 50 dates", tape_b1, (100_000, 10), (8 if QUICK else 64)),
