@@ -146,13 +146,113 @@ independent thresholds ("coins"), and the compatibility with randomized quasi-Mo
 
 ## 5. Results
 
-RESULTS_PLACEHOLDER
+All runs: 10 threads, compiled tapes, generation of the random inputs excluded; MC and scrambled Sobol with the
+rotation of option B (512 pilot paths); the same paths for all methods of a product.
+
+### 5.1 GVA on benchmarks 1–5
+
+$N$ = 8192 paths (B5: 1024), 16 repetitions (B5: 8). Bias and RMSE (including the bias) in % of the Greek, against the
+corrected estimate of this repository at the largest $N$ of `bench_paths_for_accuracy.py`; for each GVA variant the
+better of MC and Sobol, for GVA-local also the best width $s$ of {0.01, 0.03, 0.1, 0.3} × sd$(g_i)$ (an oracle in its
+favour). Last column: this repository (correction + Sobol) at the same $N$ — unbiased, so its RMSE is its standard
+deviation.
+
+| benchmark, Greek | GVA-local: bias / RMSE | GVA-integral (axis): bias / RMSE | correction + Sobol: RMSE |
+|---|---|---|---|
+| B1 $\partial V/\partial S_0$ | +0.07% / 0.57% | +0.04% / 0.29% | 0.16% |
+| B1 $\partial V/\partial\sigma$ | +0.72% / 2.24% | -0.13% / 1.58% | 0.66% |
+| B2 $\partial V/\partial S_1$ | -1.87% / 3.94% | **+100%** (no root along the axis) | 1.44% |
+| B2 $\partial V/\partial S_3$ | +0.68% / 4.78% | +0.40% / 2.04% | 1.57% |
+| B2 $\partial V/\partial\xi_1$ | +2.07% / 14.49% | **+100%** (no root along the axis) | 5.79% |
+| B2 $\partial V/\partial\kappa_1$ | -0.28% / 6.52% | **-100%** (no root along the axis) | 2.44% |
+| B3 $\partial V/\partial S_0$ | +0.12% / 0.56% | -0.15% / 0.68% | 0.20% |
+| B3 $\partial V/\partial\sigma$ | +1.88% / 2.12% | +0.72% / 2.84% | 0.70% |
+| B3 $\partial V/\partial r_0$ | -0.01% / 0.28% | -0.07% / 0.44% | 0.22% |
+| B3 $\partial V/\partial\sigma_r$ | -2.26% / 4.42% | -1.26% / 4.59% | 4.36% |
+| B4 $\partial V/\partial\lambda_0$ | +9.78% / 11.15% | +0.02% / 0.28% | 0.42% |
+| B4 $\partial V/\partial\sigma_\lambda$ | +10.33% / 11.65% | -0.15% / 2.15% | 2.40% |
+| B4 $\partial V/\partial S_1$ | +2.40% / 5.73% | **+107%** (no root along the axis) | 2.90% |
+| B5 $\partial V/\partial R_0$ | -1.07% / 1.24% | -1.67% / 2.35% | 0.15% |
+| B5 $\partial V/\partial\sigma_r$ | +2.22% / 2.43% | +0.47% / 2.58% | 0.13% |
+| B5 $\partial V/\partial\lambda_0$ | +9.34% / 9.76% | +0.00% / 0.03% | 0.01% |
+
+* **GVA-local** has the bias of a mollification: a few % on the credit Greeks at the best width (B4 $\lambda_0$, $\sigma_\lambda$:
+  +10%; B5 $\lambda_0$: +9%), and its noise is not reduced much by Sobol.
+* **GVA-integral** with an axis slice agrees with the correction wherever the axis crosses the boundary (B1, B3, the
+  default Greeks of B4/B5). On worst-of products the boundary is often not crossed along the chosen axis and the Greek is
+  lost entirely (B2 $S_1$, $\xi_1$, $\kappa_1$; B4 $S_1$): **the direction of the slice matters**; the normal of the
+  boundary (as in the correction) does not have this failure.
+
+### 5.2 The event-time correction
+
+**Benchmark 4, credit-linked autocallable** (16 × 8192 paths, Sobol option B; mean ± s.e.; difference to the correction on the same paths; time per estimate)
+
+| Greek | correction | event-time 1st (surrogate) | event-time 2nd (Stein) | event-time 2nd (quadrature) |
+|---|---|---|---|---|
+| $\partial V/\partial\lambda_0$ | -39.1 ± 0.029; 2.5 s | -39.64 ± 0.031; diff -0.545 ± 0.01; 3.4 s | -38.92 ± 0.28; diff +0.183 ± 0.28; 3.4 s | -39.09 ± 0.058; diff +0.00753 ± 0.049; 3.4 s |
+| $\partial V/\partial\sigma_\lambda$ | -0.7697 ± 0.0043; 2.5 s | -0.7645 ± 0.0046; diff +0.00515 ± 0.0018; 3.4 s | -0.7674 ± 0.021; diff +0.00229 ± 0.02; 3.4 s | -0.7701 ± 0.0053; diff -0.000371 ± 0.0039; 3.4 s |
+
+**Benchmark 5, LGM range accrual** (8 × 1024 paths, Sobol option B; mean ± s.e.; difference to the correction on the same paths; time per estimate)
+
+| Greek | correction | event-time 1st (surrogate) | event-time 2nd (Stein) | event-time 2nd (quadrature) |
+|---|---|---|---|---|
+| $\partial V/\partial\lambda_0$ | -37.45 ± 0.0041; 34 s | -37.48 ± 0.025; diff -0.0291 ± 0.024; 31 s | -37.48 ± 0.025; diff -0.0291 ± 0.024; 31 s | -37.48 ± 0.025; diff -0.0291 ± 0.024; 31 s |
+| $\partial V/\partial\sigma_\lambda$ | +0.03043 ± 0.011; 34 s | +0.02828 ± 0.0093; diff -0.00215 ± 0.002; 31 s | +0.02828 ± 0.0093; diff -0.00215 ± 0.002; 31 s | +0.02828 ± 0.0093; diff -0.00215 ± 0.002; 31 s |
+
+**Timer option, $\xi=0.3$, 52 steps (correction = delta on every step = the grid model)** (16 × 16384 paths, Sobol option B; mean ± s.e.; difference to the correction on the same paths; time per estimate)
+
+| Greek | correction | event-time 1st (surrogate) | event-time 2nd (Stein) | event-time 2nd (quadrature) |
+|---|---|---|---|---|
+| $\partial V/\partial v_0$ | -16.1 ± 0.059; 3.9 s | +33.99 ± 0.061; diff +50.1 ± 0.049; 0.11 s | -16.05 ± 0.83; diff +0.0453 ± 0.84; 0.11 s | -16.51 ± 0.18; diff -0.411 ± 0.18; 0.25 s |
+| $\partial V/\partial\theta$ | -28.3 ± 0.14; 3.9 s | +46.74 ± 0.092; diff +75 ± 0.098; 0.11 s | -28.9 ± 1.9; diff -0.602 ± 1.9; 0.11 s | -29.08 ± 0.27; diff -0.777 ± 0.27; 0.25 s |
+
+**Timer option, $\xi=0.3$, 208 steps (correction = delta on every step = the grid model)** (16 × 16384 paths, Sobol option B; mean ± s.e.; difference to the correction on the same paths; time per estimate)
+
+| Greek | correction | event-time 1st (surrogate) | event-time 2nd (Stein) | event-time 2nd (quadrature) |
+|---|---|---|---|---|
+| $\partial V/\partial v_0$ | -15.33 ± 0.052; 53 s | +32.71 ± 0.057; diff +48 ± 0.049; 0.56 s | -16.9 ± 1.6; diff -1.57 ± 1.6; 0.52 s | -15.52 ± 0.22; diff -0.194 ± 0.2; 1.2 s |
+| $\partial V/\partial\theta$ | -30.68 ± 0.13; 53 s | +47.26 ± 0.12; diff +77.9 ± 0.082; 0.56 s | -32.04 ± 2.3; diff -1.37 ± 2.3; 0.52 s | -30.98 ± 0.35; diff -0.299 ± 0.3; 1.2 s |
+
+**Timer option, $\xi=0.5$, 52 steps (correction = delta on every step = the grid model)** (16 × 16384 paths, Sobol option B; mean ± s.e.; difference to the correction on the same paths; time per estimate)
+
+| Greek | correction | event-time 1st (surrogate) | event-time 2nd (Stein) | event-time 2nd (quadrature) |
+|---|---|---|---|---|
+| $\partial V/\partial v_0$ | -5.726 ± 0.068; 4.1 s | +33.32 ± 0.28; diff +39 ± 0.3; 0.12 s | -6.297 ± 0.72; diff -0.571 ± 0.71; 0.11 s | -6.411 ± 0.39; diff -0.686 ± 0.42; 0.2 s |
+| $\partial V/\partial\theta$ | -3.989 ± 0.24; 4.1 s | +64.35 ± 0.43; diff +68.3 ± 0.48; 0.12 s | -4.413 ± 1.5; diff -0.424 ± 1.5; 0.11 s | -5.468 ± 0.62; diff -1.48 ± 0.69; 0.2 s |
+
+**Timer option, $\xi=0.5$, 208 steps (correction = delta on every step = the grid model)** (16 × 16384 paths, Sobol option B; mean ± s.e.; difference to the correction on the same paths; time per estimate)
+
+| Greek | correction | event-time 1st (surrogate) | event-time 2nd (Stein) | event-time 2nd (quadrature) |
+|---|---|---|---|---|
+| $\partial V/\partial v_0$ | -7.065 ± 0.063; 55 s | +30.85 ± 0.31; diff +37.9 ± 0.32; 0.49 s | -6.349 ± 1.7; diff +0.716 ± 1.7; 0.45 s | -7.475 ± 0.39; diff -0.41 ± 0.39; 1 s |
+| $\partial V/\partial\theta$ | -9.951 ± 0.19; 55 s | +60.93 ± 0.59; diff +70.9 ± 0.6; 0.49 s | -10.72 ± 3.4; diff -0.768 ± 3.4; 0.45 s | -10.74 ± 0.61; diff -0.791 ± 0.64; 1 s |
+
+**Reading.**
+* *First order (the surrogate).* Biased whenever the payment at the event has curvature in the step's noise:
+  benchmark 4, $\partial V/\partial\lambda_0$: $-0.545\pm0.010$ ($1.4\%$, $>50$ s.e.) against the correction; the timer
+  (a convex payment $(S_\tau-K)^+$): **the wrong sign** at every grid. Benchmark 5: the payment at default is known at the
+  start of the step, the Itô term vanishes and all orders coincide.
+* *Second order.* Stein's identity removes the bias but is $4$--$10\times$ noisier; the 1-D quadrature is unbiased with
+  a noise close to the correction: benchmark 4, $\partial V/\partial\lambda_0$: $+0.008\pm0.049$ against the correction.
+* *Cost.* With an exponential (Cox) threshold the correction integrates the threshold exactly (the coin): benchmark 4
+  2.5 s against 3.4 s per estimate, benchmark 5 with Sobol $\approx 6\times$ less noise on $\partial V/\partial\lambda_0$ at the
+  same time. With a **fixed** threshold (the timer) there is no coin: the correction solves a root on every step of the
+  accumulator (52 / 208 steps: 4 s / 52–55 s per estimate) while the event-time term is computed once at the event
+  (0.2 s / 1.1–1.3 s) — on this product the second-order event-time correction is $16$–$20\times$ (52 steps) and
+  $44$–$54\times$ (208 steps) cheaper per estimate; its noise is $2$–$6\times$ larger, so in work (time × variance) it
+  needs $1.4$–$5.5\times$ less on the timer Greeks except one case ($\xi=0.5$, 52 steps, $\partial V/\partial v_0$:
+  $0.6\times$, i.e. more), and it approaches the grid model as the grid is refined.
+* *Targets.* The event-time correction targets the continuous event time, the correction the grid model; on the timer
+  the gap of the quadrature variant to the grid shrinks from 52 to 208 steps (e.g. $\xi=0.3$, $\partial V/\partial v_0$:
+  $-0.41\pm0.29$ → $+0.10\pm0.39$ on MC).
+
+
 
 ## 6. Reproduce
 
 ```
 OPENBLAS_NUM_THREADS=1 PRODUCT=credit R=16 NPATH=8192 python benchmarks/bench_event_time.py
 OPENBLAS_NUM_THREADS=1 PRODUCT=lgm    R=8  NPATH=1024 python benchmarks/bench_event_time.py
-OPENBLAS_NUM_THREADS=1 PRODUCT=timer XI=0.3 NSTEP=52  R=16 NPATH=20000 python benchmarks/bench_event_time.py   (also XI=0.5, NSTEP=208)
+OPENBLAS_NUM_THREADS=1 PRODUCT=timer XI=0.3 NSTEP=52  R=16 NPATH=16384 python benchmarks/bench_event_time.py   (also XI=0.5, NSTEP=208)
 OPENBLAS_NUM_THREADS=1 REF_DIR=<folder of bench_paths_for_accuracy.py OUT files> python benchmarks/bench_gva.py
 ```

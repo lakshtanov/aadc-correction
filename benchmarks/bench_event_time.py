@@ -15,7 +15,7 @@ Output per Greek: mean +- s.e. over R repetitions, std of one estimate, time per
 correction (same paths). The event-time methods target the continuous event time; the correction the grid model.
 
 Usage: OPENBLAS_NUM_THREADS=1 PRODUCT=credit|lgm|timer R=16 NPATH=8192 python benchmarks/bench_event_time.py
-       (timer: XI=0.3|0.5, NSTEP=52|208; OUT=<json>)
+       (timer: XI=0.3|0.5, NSTEP=52|208; NPATH must be a power of two for Sobol; OUT=<json>)
 """
 import os, sys, io, math, time, json, contextlib, warnings
 import numpy as np
@@ -79,14 +79,14 @@ def record_credit():
 
 
 # ── benchmark 5: the LGM range accrual of bench_lgm_range_accrual.py, default marked as an accumulator event ──
-import bench_lgm_range_accrual as L
+import bench_lgm_range_accrual as LGM
 
 
 def record_lgm(declare=False):
     """Tape; inputs: theta, then normals z_r (N), z_lam (N), z_E (1). Returns (fn, rP, za, th, thv, ev)."""
-    N, dt, DATE_STEPS, QUARTER = L.N, L.dt, L.DATE_STEPS, L.QUARTER
-    R0, A_MR, SIG_R, TAU, LAM0, KAP_L, THE_L, RHO_RL, SIG_L = L.R0, L.A_MR, L.SIG_R, L.TAU, L.LAM0, L.KAP_L, L.THE_L, L.RHO_RL, L.SIG_L
-    REC, NOTIONAL, CPN_Q, LO, HI, THETA = L.REC, L.NOTIONAL, L.CPN_Q, L.LO, L.HI, L.THETA
+    N, dt, DATE_STEPS, QUARTER = LGM.N, LGM.dt, LGM.DATE_STEPS, LGM.QUARTER
+    R0, A_MR, SIG_R, TAU, LAM0, KAP_L, THE_L, RHO_RL, SIG_L = LGM.R0, LGM.A_MR, LGM.SIG_R, LGM.TAU, LGM.LAM0, LGM.KAP_L, LGM.THE_L, LGM.RHO_RL, LGM.SIG_L
+    REC, NOTIONAL, CPN_Q, LO, HI, THETA = LGM.REC, LGM.NOTIONAL, LGM.CPN_Q, LGM.LO, LGM.HI, LGM.THETA
     fn = aadc.Functions(); fn.start_recording(register_switches=aadc.SWITCH_JUMP)
     r0 = c(R0); a_r0 = r0.mark_as_input()
     sr = c(SIG_R); a_sr = sr.mark_as_input()
@@ -191,7 +191,7 @@ def methods(prod):
             ref.precompute_directions(t["thv"])
         fn, rP, za, th, thv, ev = record_credit()
     elif prod == "lgm":
-        t = L.record(True); names = L.NAMES
+        t = LGM.record(True); names = LGM.NAMES
         ref = CorrectionDriverVec2(t["fn"], t["rP"], t["za"], t["th"], num_threads=10, coins="auto", defaults=t["defaults"], indicator_threads=8)
         with contextlib.redirect_stdout(io.StringIO()):
             ref.precompute_directions(t["thv"])
