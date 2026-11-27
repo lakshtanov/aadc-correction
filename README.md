@@ -232,6 +232,19 @@ the same 4000 paths on every point; gamma = central difference of two corrected 
 smooth in the spot for fixed paths, so the ladder is smooth at 4000 paths (RMSE vs an 8M-path bump: delta 0.006,
 gamma 0.001; bump on the same paths: 0.024, 0.045). `PLOTS=1` writes `fig_ladder_b2.pdf`.
 
+## Comparison with the Kovalov–Naumann corrections
+
+[docs/comparison_kovalov_naumann.md](docs/comparison_kovalov_naumann.md) compares this repository with two recent
+corrections from RWTH Aachen (STCE): the event-time correction of A. Kovalov and U. Naumann (*Surrogate Greeks for
+Regime-Switching Processes via Corrected AD*, first-order surrogate; second order by Stein's identity or quadrature) and
+the two GVA variants of U. Naumann's QuantMinds 2026 talk (local mollification, integral co-area rule). Implementations:
+`event_time.py` (`EventTimeDriver`, `AccumulatorEvent`), `gva_drivers.py`; benchmarks: `benchmarks/bench_event_time.py`,
+`benchmarks/bench_gva.py`. In short: the first-order surrogate is biased whenever the payment at the event is curved in
+the step's noise (wrong sign on a timer option); GVA-local carries the bias of a mollification; GVA-integral with a slice
+along a coordinate axis loses the Greek where the axis does not cross the boundary (worst-of); with a fixed threshold and
+many steps (timer) the second-order event-time correction needs less work than the correction of this repository, with
+an exponential threshold (default) the exact integration of the threshold here is cheaper and less noisy.
+
 ## QuantLib compatibility
 
 `tests/test_quantlib_compat.py` runs the driver on models taken from QuantLib's own processes, recorded on the AADC
