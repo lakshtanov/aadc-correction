@@ -323,8 +323,10 @@ All steps batch-vectorized via `aadc.evaluate()` with AVX + multithreading.
 
 ## References
 
-- Lakshtanov, E. "Unbiased Monte Carlo Greeks for Discontinuous Payoffs" (2026)
+- Lakshtanov, E. "Unbiased Monte Carlo Greeks for Discontinuous Payoffs", arXiv:2609.06137 (2026)
 - Fries, C.P., "Stochastic algorithmic differentiation of (expectations of) discontinuous functions", arXiv:1811.05741, 2018
 - Joshi, M. and D. Kainth, "Rapid and accurate development of prices and Greeks for nth to default credit swaps", *Quantitative Finance* 4(3), 2004
 - Chan, J.H. and M.S. Joshi, "Fast Monte Carlo Greeks for financial products with discontinuous pay-offs", *Mathematical Finance* 23(3), 2013
+- Kovalov, A. and U. Naumann, "Surrogate Greeks for Regime-Switching Processes via Corrected AD", poster, RWTH Aachen, STCE, 2026 — poster and code: [gitlab.stce.rwth-aachen.de/a.kovalov/hsde-sensitivity](https://gitlab.stce.rwth-aachen.de/a.kovalov/hsde-sensitivity) (see [docs/comparison_kovalov_naumann.md](docs/comparison_kovalov_naumann.md))
+- Naumann, U., "Greeks Value Adjustment (GVA) — or: Algorithmic Differentiation Software beyond Algorithmic Differentiability", talk, [QuantMinds International 2026](https://informaconnect.com/quantminds-international/), London, November 2026
 - `pip install aadc` — [matlogica.com](https://matlogica.com)
