@@ -120,7 +120,7 @@ def run_driver(scheme):
     variance normals 1, 3, 5, ...)."""
     fn, rP, za, th, thv = tape(scheme)
     mc = CorrectionDriverVec2(fn, rP, za, th, num_threads=THREADS); mc.precompute_directions(thv)
-    q = {"RQMC": CorrectionDriverRQMC(fn, rP, za, th, num_threads=THREADS, pilot_seed=999),
+    q = {"RQMC": CorrectionDriverRQMC(fn, rP, za, th, num_threads=THREADS, pilot_seed=999, n_pilot=int(os.environ.get("N_PILOT", "2000"))),
          "RQMC_bridge": CorrectionDriverRQMC(fn, rP, za, th, num_threads=THREADS, ordering="bridge",
                                              bridge_factors=[list(range(0, 2 * N_STEPS, 2)), list(range(1, 2 * N_STEPS, 2))])}
     for d in q.values():                       # twice: the second call is timed warm, like the estimates below
